@@ -1,0 +1,17 @@
+# Copyright (c) IBM Corporation 2019, 2020
+# Apache License, Version 2.0 (see https://opensource.org/licenses/Apache-2.0)
+
+#ibmi_endsbs_all_ssh.yml 
+#The sample file is to provide an example on how to end all subsystems and jobs except that required for SSH.
+---
+- hosts: ibmi
+  gather_facts: false
+  collections: 
+    - ibm.power_ibmi
+
+  tasks:
+    - name: End *DTAQ host server
+      ibmi_host_server_service:
+        name_list: ['*DTAQ']
+        state: stopped
+        joblog: True

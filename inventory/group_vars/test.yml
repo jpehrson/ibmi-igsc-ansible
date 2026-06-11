@@ -1,0 +1,42 @@
+﻿---
+################################################################################
+# Test Environment Group Variables
+################################################################################
+
+# Environment identifier
+env_name: test
+
+# WAS installation settings
+was_repo_path: /home/wellsky/was_90526_media
+skip_install: false
+
+# Save file library for this environment
+save_lib: TESTLIB
+
+# Application directory
+app_dir: /home/wellsky/apps/test
+
+# Logging level
+log_level: INFO
+
+# Failure action
+default_action: abort
+
+# Deployment flags
+skip_restore: false
+skip_apps: false
+
+# Verification settings
+verify_deployment: true
+health_check_retries: 3
+health_check_delay: 30
+
+vault_vk4060_password: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          33323263356563323432663932356439643365656237396264343433393132316337303539646565
+          3761303935616133363665313463323439656436396532370a366366336133396637633333646134
+          63393963626534316166356633643738376134326434326139313731653737343661306165656463
+          3863396331616336320a656333666431666464653437643830323636633836376436336531643631
+          3666
+
+# Made with Bob

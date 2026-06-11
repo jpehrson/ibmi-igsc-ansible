@@ -1,0 +1,106 @@
+---
+################################################################################
+# IBM i ESA Column Discovery Playbook
+#
+# Purpose:
+#   Discover available columns in QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+#   to determine what's available on this system version
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-discover-columns.yml --limit vk4060
+#
+################################################################################
+
+- name: Discover ESA View Columns
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  tasks:
+    - name: Query SYSCOLUMNS to discover available columns
+      ibmi_sql_query:
+        sql: |
+          SELECT 
+            COLUMN_NAME,
+            DATA_TYPE,
+            LENGTH,
+            NUMERIC_SCALE,
+            IS_NULLABLE,
+            COLUMN_TEXT
+          FROM QSYS2.SYSCOLUMNS
+          WHERE TABLE_SCHEMA = 'QSYS2'
+            AND TABLE_NAME = 'ELECTRONIC_SERVICE_AGENT_INFO'
+          ORDER BY ORDINAL_POSITION
+      register: column_info
+      failed_when: false
+
+    - name: Display Available Columns
+      debug:
+        msg: |
+          ================================================================================
+          Available Columns in QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+          ================================================================================
+          {% if column_info.rc == 0 and column_info.row | length > 0 %}
+          {% for col in column_info.row %}
+          Column: {{ col.COLUMN_NAME }}
+            Type: {{ col.DATA_TYPE }}({{ col.LENGTH }}{% if col.NUMERIC_SCALE %},{{ col.NUMERIC_SCALE }}{% endif %})
+            Nullable: {{ col.IS_NULLABLE }}
+            Description: {{ col.COLUMN_TEXT | default('N/A') }}
+          --------------------------------------------------------------------------------
+          {% endfor %}
+          
+          Total Columns: {{ column_info.row | length }}
+          {% else %}
+          Unable to retrieve column information.
+          Return Code: {{ column_info.rc }}
+          {% endif %}
+          ================================================================================
+      when: column_info.rc == 0
+
+    - name: Handle Discovery Errors
+      debug:
+        msg: |
+          ================================================================================
+          ERROR: Failed to discover ESA columns
+          ================================================================================
+          Return Code: {{ column_info.rc }}
+          
+          {% if column_info.stderr is defined %}
+          Error: {{ column_info.stderr }}
+          {% endif %}
+          
+          This may indicate:
+          - QSYS2.ELECTRONIC_SERVICE_AGENT_INFO view doesn't exist
+          - User lacks authority to query system catalog
+          - SQL services are not available
+          ================================================================================
+      when: column_info.rc != 0
+
+    - name: Try simple SELECT * to see if view exists
+      ibmi_sql_query:
+        sql: "SELECT * FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO FETCH FIRST 1 ROW ONLY"
+      register: test_query
+      failed_when: false
+      when: column_info.rc != 0
+
+    - name: Display test query result
+      debug:
+        msg: |
+          ================================================================================
+          Test Query Result
+          ================================================================================
+          Return Code: {{ test_query.rc | default('N/A') }}
+          {% if test_query.rc is defined and test_query.rc == 0 %}
+          View exists and is accessible.
+          {% elif test_query.rc is defined %}
+          View may not exist or is not accessible.
+          {% else %}
+          Test query was not executed.
+          {% endif %}
+          ================================================================================
+      when: test_query is defined and test_query.rc is defined
+
+################################################################################
+# Made with Bob
+################################################################################

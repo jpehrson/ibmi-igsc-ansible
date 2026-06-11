@@ -1,0 +1,35 @@
+# Copyright (c) IBM Corporation 2019, 2020
+# Apache License, Version 2.0 (see https://opensource.org/licenses/Apache-2.0)
+
+#esa_refresh_config.yml 
+#Example playbook to delete and re-create the ESA service configuration.
+---
+- hosts: ibmi
+  gather_facts: true
+  collections: 
+    - ibm.power_ibmi
+  vars:
+    state: 'MN'
+
+  tasks:
+    - name: Print all available facts
+      debug:
+        var: ansible_facts
+
+    - name: Retrieve Country Information
+      ibmi_sysval:
+        sysvalue:
+          - { 'name':'qcntryid' }
+      register: qcntryid_sysval
+         
+    - name: Delete Service Config
+      ibmi_cl_command:
+        cmd: 'DLTSRVCFG'
+        joblog: True 
+      when: qcntryid_sysval.sysval[0].value | length > 0
+      
+    - name: Create Service Config
+      ibmi_cl_command:
+        cmd: 'CRTSRVCFG ROLE(*PRIMARY) CNNTYPE(*DIRECT) CNTRYID({{ qcntryid_sysval.sysval[0].value }}) STATE({{ state }})'
+        joblog: True
+      when: qcntryid_sysval.sysval[0].value | length > 0

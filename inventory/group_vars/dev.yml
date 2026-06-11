@@ -1,0 +1,49 @@
+﻿---
+################################################################################
+# Development Environment Group Variables
+################################################################################
+
+# Environment identifier
+env_name: dev
+
+# WAS installation settings
+was_repo_path: /home/wellsky/was_90526_media
+skip_install: false
+
+# Save file library for this environment
+save_lib: DEVLIB
+
+# Application directory
+app_dir: /home/wellsky/apps/dev
+
+# Logging level (can be more verbose in dev)
+log_level: DEBUG
+
+# Failure action (more lenient in dev)
+default_action: retry
+
+# Deployment flags
+skip_restore: false
+skip_apps: false
+
+# Verification settings
+verify_deployment: true
+health_check_retries: 5
+health_check_delay: 20
+
+vault_dev1_password: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          33316230356635393239376463323861656530336236316332333331373266636132623032613639
+          6131653337343736376365303934613666336238393437300a326463363636363532633764373839
+          64323531346138373565646266323039386437393436373236323161376264366331303962633433
+          6633356332363235390a613736363463343232663031656661386666323165646439653934626364
+          61636235343334363661663536303438376164316335316630323936656231356262
+
+vault_dev2_password: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          31396663373632353936383232306537346463613039656465613738626664373965626632646635
+          3366333431623831303630316234633439376361633335380a313133613065353530303062383362
+          61613162306464303665303036343661663232336238373538633062366666353339323962303866
+          3064316331363330650a333665306631376134363766343333383433313935353238656337386265
+          64633739616532313839316335323264393737326434316239303066326665616439
+# Made with Bob

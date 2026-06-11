@@ -1,0 +1,38 @@
+﻿---
+################################################################################
+# Production Environment Group Variables
+################################################################################
+
+# Environment identifier
+env_name: prod
+
+# WAS installation settings
+was_repo_path: /home/wellsky/was_90526_media
+skip_install: false
+
+# Save file library for this environment
+save_lib: PRODLIB
+
+# Application directory
+app_dir: /home/wellsky/apps/prod
+
+# Logging level (less verbose in production)
+log_level: INFO
+
+# Failure action (strict in production)
+default_action: abort
+
+# Deployment flags
+skip_restore: false
+skip_apps: false
+
+# Verification settings (more thorough in production)
+verify_deployment: true
+health_check_retries: 5
+health_check_delay: 60
+
+# Additional production safeguards
+require_approval: true
+backup_before_deploy: true
+
+# Made with Bob

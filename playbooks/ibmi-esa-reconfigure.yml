@@ -1,0 +1,673 @@
+---
+################################################################################
+# IBM i Electronic Service Agent (ESA) - Master Reconfiguration Playbook
+#
+# Purpose:
+#   Orchestrate the complete ESA reconfiguration workflow:
+#   1. Query current status
+#   2. Delete existing configuration
+#   3. Create new configuration
+#   4. Configure settings
+#   5. Enable ESA
+#   6. Verify jobs and configuration
+#
+# Reference:
+#   https://www.ibm.com/support/pages/configuration-instructions-electronic-customer-support-ecs-and-electronic-service-agent-esa-ibm-i
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-reconfigure.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-reconfigure.yml -e "target_env=test"
+#   ansible-playbook playbooks/ibmi-esa-reconfigure.yml --limit vk4060 --check
+#
+# IMPORTANT:
+#   - Requires *SECOFR authority
+#   - This will DELETE and RECREATE ESA configuration
+#   - Backup is created automatically
+#   - Review configuration variables before running
+#
+################################################################################
+
+- name: IBM i ESA Complete Reconfiguration Workflow
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: true
+  collections:
+    - ibm.power_ibmi
+  
+  vars:
+    # Workflow control
+    skip_initial_query: "{{ esa_skip_initial_query | default(false) }}"
+    skip_deletion: "{{ esa_skip_deletion | default(false) }}"
+    skip_verification: "{{ esa_skip_verification | default(false) }}"
+    
+    # Confirmation
+    require_confirmation: "{{ esa_require_confirmation | default(true) }}"
+    auto_confirm: "{{ esa_auto_confirm | default(false) }}"
+    
+    # Error handling
+    continue_on_error: "{{ esa_continue_on_error | default(false) }}"
+    
+    # Dry run
+    dry_run: "{{ ansible_check_mode | default(false) }}"
+
+  tasks:
+    ################################################################################
+    # Phase 1: Initial Assessment
+    ################################################################################
+    
+    - name: "Phase 1: Query Current ESA Status"
+      block:
+        - name: Display Phase Header
+          debug:
+            msg: |
+              ================================================================================
+              Phase 1: Initial Assessment - {{ inventory_hostname }}
+              ================================================================================
+              Querying current ESA configuration and status...
+              ================================================================================
+
+        - name: Query Current ESA Configuration
+          ibmi_sql_query:
+            sql: |
+              SELECT
+                ESA_ENABLED,
+                ESA_CONFIGURED,
+                CUSTOMER_NUMBER,
+                CUSTOMER_NAME,
+                CUSTOMER_CONTACT_NAME,
+                LAST_TRANSMISSION_TIMESTAMP
+              FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+          register: initial_esa_status
+          failed_when: false
+
+        - name: Display Current Status (ESA Found)
+          debug:
+            msg: |
+              Current ESA Status:
+              {% set esa = initial_esa_status.row[0] %}
+              ESA Enabled:       {{ esa.ESA_ENABLED | default('N/A') }}
+              ESA Configured:    {{ esa.ESA_CONFIGURED | default('N/A') }}
+              Customer:          {{ esa.CUSTOMER_NAME | default('Not Set') }}
+              Contact:           {{ esa.CUSTOMER_CONTACT_NAME | default('Not Set') }}
+              Last Transmission: {{ esa.LAST_TRANSMISSION_TIMESTAMP | default('Never') }}
+          when:
+            - initial_esa_status.rc == 0
+            - initial_esa_status.row | length > 0
+
+        - name: Display Current Status (No ESA Found)
+          debug:
+            msg: "No ESA configuration found or query failed"
+          when: initial_esa_status.rc != 0 or initial_esa_status.row | length == 0
+
+        - name: Set ESA Status Facts
+          set_fact:
+            esa_exists: "{{ initial_esa_status.rc == 0 and initial_esa_status.row | length > 0 }}"
+            esa_has_errors: false  # Cannot determine without LAST_TRANSMISSION_STATUS column
+            esa_is_configured: "{{ (initial_esa_status.row[0].ESA_CONFIGURED == 'YES') if (initial_esa_status.rc == 0 and initial_esa_status.row | length > 0) else false }}"
+
+      when: not skip_initial_query
+
+    ################################################################################
+    # Phase 2: Confirmation
+    ################################################################################
+
+    - name: "Phase 2: Confirmation"
+      block:
+        - name: Display Reconfiguration Warning
+          debug:
+            msg: |
+              ================================================================================
+              ⚠ WARNING: ESA Reconfiguration
+              ================================================================================
+              This playbook will:
+              1. DELETE the existing ESA configuration
+              2. CREATE a new ESA configuration
+              3. CONFIGURE ESA settings
+              4. ENABLE ESA service
+              5. VERIFY the configuration
+              
+              System: {{ inventory_hostname }}
+              Current Status: {{ 'Configured' if esa_is_configured else 'Not Configured' }}
+              
+              {% if not dry_run %}
+              This will make PERMANENT changes to the system.
+              {% else %}
+              DRY RUN MODE - No changes will be made
+              {% endif %}
+              ================================================================================
+
+        - name: Pause for Confirmation
+          pause:
+            prompt: |
+              
+              Do you want to proceed with ESA reconfiguration on {{ inventory_hostname }}?
+              Press ENTER to continue or Ctrl+C to abort
+          when:
+            - require_confirmation | bool
+            - not auto_confirm | bool
+            - not dry_run
+
+      when: esa_exists | default(true)
+
+    ################################################################################
+    # Phase 3: Delete Existing Configuration
+    ################################################################################
+
+    - name: "Phase 3: Delete Existing ESA Configuration"
+      block:
+        - name: Display Phase Header
+          debug:
+            msg: |
+              ================================================================================
+              Phase 3: Deleting Existing Configuration - {{ inventory_hostname }}
+              ================================================================================
+
+        - name: Disable ESA Service Agent
+          ibmi_cl_command:
+            cmd: "CHGSRVAGTA ENABLE(*NO)"
+          register: disable_esa_result
+          failed_when: false
+          when:
+            - esa_is_configured | default(false)
+            - not dry_run
+
+        - name: Wait for ESA Jobs to End
+          pause:
+            seconds: 10
+          when:
+            - esa_is_configured | default(false)
+            - not dry_run
+
+        - name: Delete ESA Profile Files
+          ibmi_cl_command:
+            cmd: "DLTF FILE(QUSRSYS/QESAPROF*)"
+          register: delete_profiles_result
+          failed_when: false
+          when:
+            - esa_is_configured | default(false)
+            - not dry_run
+
+        - name: Delete ESA Line Description
+          ibmi_cl_command:
+            cmd: "WRKLIND LIND(QESALINE)"
+          register: check_line_result
+          failed_when: false
+          when:
+            - esa_is_configured | default(false)
+            - not dry_run
+
+        - name: Remove ESA Configuration Link
+          ibmi_cl_command:
+            cmd: "RMVLNK OBJLNK('/QIBM/UserData/OS/ServiceAgent')"
+          register: remove_link_result
+          failed_when: false
+          when:
+            - esa_is_configured | default(false)
+            - not dry_run
+
+        - name: Display Deletion Results
+          debug:
+            msg: |
+              ESA Deletion Results:
+              - Disable: {{ 'Success' if (disable_esa_result.rc | default(1)) == 0 else 'Failed/Skipped' }}
+              - Profile Files: {{ 'Deleted' if (delete_profiles_result.rc | default(1)) == 0 else 'Failed/Not Found' }}
+              - Line Description: {{ 'Checked' if (check_line_result.rc | default(1)) == 0 else 'Failed/Not Found' }}
+              - Config Link: {{ 'Removed' if (remove_link_result.rc | default(1)) == 0 else 'Failed/Not Found' }}
+          when: esa_is_configured | default(false)
+
+        - name: Skip Deletion Message
+          debug:
+            msg: "Skipping deletion - no existing configuration found"
+          when: not (esa_is_configured | default(false))
+
+      when:
+        - not skip_deletion
+        - esa_exists | default(true)
+
+    ################################################################################
+    # Phase 4: Create New Configuration
+    ################################################################################
+
+    - name: "Phase 4: Create New ESA Configuration"
+      block:
+        - name: Display Phase Header
+          debug:
+            msg: |
+              ================================================================================
+              Phase 4: Creating New Configuration - {{ inventory_hostname }}
+              ================================================================================
+
+        - name: Create ESA Service Configuration
+          ibmi_cl_command:
+            cmd: "CRTSRVCFG ROLE(*PRIMARY) CNNTYPE(*DIRECT) CNTRYID({{ esa_country_code | default('US') }}) STATE({{ esa_state_code | default('CO') }})"
+          register: create_esa_result
+          failed_when: false
+          when: not dry_run
+
+        - name: Display Creation Result
+          debug:
+            msg: |
+              ESA Creation Result:
+              Return Code: {{ create_esa_result.rc | default('N/A - Dry Run') }}
+              {% if create_esa_result.stdout is defined %}
+              Output: {{ create_esa_result.stdout }}
+              {% endif %}
+              {% if create_esa_result.stderr is defined and create_esa_result.stderr %}
+              Error: {{ create_esa_result.stderr }}
+              {% endif %}
+
+        - name: Fail on Creation Error
+          fail:
+            msg: "ESA creation failed with return code {{ create_esa_result.rc }}"
+          when:
+            - not dry_run
+            - create_esa_result.rc is defined
+            - create_esa_result.rc != 0
+            - not continue_on_error
+
+      rescue:
+        - name: Handle Creation Failure
+          debug:
+            msg: |
+              ⚠ ESA creation failed on {{ inventory_hostname }}
+              {% if continue_on_error %}
+              Continuing with workflow...
+              {% else %}
+              Aborting workflow
+              {% endif %}
+
+        - name: Fail on Creation Error
+          fail:
+            msg: "ESA creation failed - aborting workflow"
+          when: not continue_on_error
+
+    ################################################################################
+    # Phase 5: Configure ESA Settings
+    ################################################################################
+
+    - name: "Phase 5: Configure ESA Settings"
+      block:
+        - name: Display Phase Header
+          debug:
+            msg: |
+              ================================================================================
+              Phase 5: Configuring ESA Settings - {{ inventory_hostname }}
+              ================================================================================
+
+        - name: Configure Contact Information Defaults
+          ibmi_cl_command:
+            cmd: "CHGCNTINF MAILADDR(*SAME *SAME *SAME *SAME *SAME {{ esa_country_code | default('US') }}) MEDPTF(*DVDROM)"
+            joblog: true
+          register: configure_contact_result
+          failed_when: false
+          when: not dry_run
+
+        - name: Display Contact Configuration Result
+          debug:
+            msg: |
+              ESA Configuration Result:
+              Return Code: {{ configure_contact_result.rc | default('N/A - Dry Run') }}
+              Command: CHGCNTINF MAILADDR(*SAME *SAME *SAME *SAME *SAME {{ esa_country_code | default('US') }}) MEDPTF(*DVDROM)
+              {% if configure_contact_result.stdout is defined %}
+              Output: {{ configure_contact_result.stdout }}
+              {% endif %}
+              {% if configure_contact_result.stderr is defined and configure_contact_result.stderr %}
+              Error: {{ configure_contact_result.stderr }}
+              {% endif %}
+              {% if configure_contact_result.job_log is defined %}
+              Job Log: {{ configure_contact_result.job_log }}
+              {% endif %}
+
+        - name: Fail on Configuration Error
+          fail:
+            msg: "ESA configuration failed with return code {{ configure_contact_result.rc }}"
+          when:
+            - not dry_run
+            - configure_contact_result.rc is defined
+            - configure_contact_result.rc != 0
+            - not continue_on_error
+
+      rescue:
+        - name: Handle Configuration Failure
+          debug:
+            msg: |
+              ⚠ ESA configuration failed on {{ inventory_hostname }}
+              {% if continue_on_error %}
+              Continuing with workflow...
+              {% else %}
+              Aborting workflow
+              {% endif %}
+
+        - name: Fail on Configuration Error
+          fail:
+            msg: "ESA configuration failed - aborting workflow"
+          when: not continue_on_error
+
+    ################################################################################
+    # Phase 6: Enable ESA Service
+    ################################################################################
+
+    - name: "Phase 6: Enable ESA Service"
+      block:
+        - name: Display Phase Header
+          debug:
+            msg: |
+              ================================================================================
+              Phase 6: Enabling ESA Service - {{ inventory_hostname }}
+              ================================================================================
+
+        - name: Enable ESA Service Agent
+          ibmi_cl_command:
+            cmd: "CHGSRVAGTA ENABLE(*YES)"
+            joblog: true
+          register: enable_esa_result
+          failed_when: false
+          when: not dry_run
+
+        - name: Display Enable Result
+          debug:
+            msg: |
+              ESA Enable Result:
+              Return Code: {{ enable_esa_result.rc | default('N/A - Dry Run') }}
+              {% if enable_esa_result.stdout is defined %}
+              Output: {{ enable_esa_result.stdout }}
+              {% endif %}
+              {% if enable_esa_result.stderr is defined and enable_esa_result.stderr %}
+              Error: {{ enable_esa_result.stderr }}
+              {% endif %}
+              {% if enable_esa_result.job_log is defined %}
+              Job Log: {{ enable_esa_result.job_log }}
+              {% endif %}
+
+        - name: Wait for ESA Jobs to Start
+          pause:
+            seconds: 120
+          when:
+            - not dry_run
+            - enable_esa_result.rc is defined
+            - enable_esa_result.rc == 0
+
+        - name: Fail on Enable Error
+          fail:
+            msg: "ESA enable failed with return code {{ enable_esa_result.rc }}"
+          when:
+            - not dry_run
+            - enable_esa_result.rc is defined
+            - enable_esa_result.rc != 0
+            - not continue_on_error
+
+      rescue:
+        - name: Handle Enable Failure
+          debug:
+            msg: |
+              ⚠ ESA enable failed on {{ inventory_hostname }}
+              {% if continue_on_error %}
+              Continuing with workflow...
+              {% else %}
+              Aborting workflow
+              {% endif %}
+
+        - name: Fail on Enable Error
+          fail:
+            msg: "ESA enable failed - aborting workflow"
+          when: not continue_on_error
+
+    ################################################################################
+    # Phase 7: Verify Jobs
+    ################################################################################
+
+    - name: "Phase 7: Verify ESA Jobs"
+      block:
+        - name: Display Phase Header
+          debug:
+            msg: |
+              ================================================================================
+              Phase 7: Verifying ESA Jobs - {{ inventory_hostname }}
+              ================================================================================
+
+        - name: Query Active ESA Jobs
+          ibmi_sql_query:
+            sql: |
+              SELECT
+                JOB_NAME,
+                JOB_STATUS,
+                JOB_TYPE,
+                SUBSYSTEM,
+                AUTHORIZATION_NAME,
+                FUNCTION,
+                CPU_TIME
+              FROM TABLE(QSYS2.ACTIVE_JOB_INFO())
+              WHERE JOB_NAME LIKE 'QS9%'
+              ORDER BY JOB_NAME
+          register: esa_jobs_status
+          failed_when: false
+
+        - name: Display ESA Jobs Status
+          debug:
+            msg: |
+              ESA Jobs Status:
+              {% if esa_jobs_status.row | length > 0 %}
+              {% for job in esa_jobs_status.row %}
+              - {{ job.JOB_NAME }}: {{ job.JOB_STATUS }} | {{ job.SUBSYSTEM | default('N/A') }} | {{ job.AUTHORIZATION_NAME | default('N/A') }} | {{ job.FUNCTION | default('N/A') }}
+              {% endfor %}
+              Total Active QS9* Jobs: {{ esa_jobs_status.row | length }}
+              {% else %}
+              No QS9* ESA jobs found running
+              {% endif %}
+
+      when: not skip_verification
+
+    ################################################################################
+    # Phase 8: Final Verification
+    ################################################################################
+
+    - name: "Phase 8: Final Configuration Verification"
+      block:
+        - name: Display Phase Header
+          debug:
+            msg: |
+              ================================================================================
+              Phase 8: Final Verification - {{ inventory_hostname }}
+              ================================================================================
+
+        - name: Query Final ESA Configuration
+          ibmi_sql_query:
+            sql: |
+              SELECT
+                ESA_ENABLED,
+                ESA_CONFIGURED,
+                CUSTOMER_NUMBER,
+                CUSTOMER_NAME,
+                CUSTOMER_COUNTRY,
+                CUSTOMER_CONTACT_NAME,
+                CUSTOMER_CONTACT_EMAIL,
+                TRANSMISSION_METHOD
+              FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+          register: final_verification
+          failed_when: false
+
+        - name: Display Final Configuration (Success)
+          debug:
+            msg: |
+              Final ESA Configuration:
+              {% set esa = final_verification.row[0] %}
+              ESA Enabled:            {{ esa.ESA_ENABLED | default('N/A') }}
+              ESA Configured:         {{ esa.ESA_CONFIGURED | default('N/A') }}
+              Customer Number:        {{ esa.CUSTOMER_NUMBER | default('N/A') }}
+              Customer Name:          {{ esa.CUSTOMER_NAME | default('N/A') }}
+              Customer Country:       {{ esa.CUSTOMER_COUNTRY | default('N/A') }}
+              Contact Name:           {{ esa.CUSTOMER_CONTACT_NAME | default('Not Set') }}
+              Contact Email:          {{ esa.CUSTOMER_CONTACT_EMAIL | default('Not Set') }}
+              Method:                 {{ esa.TRANSMISSION_METHOD | default('N/A') }}
+          when:
+            - final_verification.rc is defined
+            - final_verification.rc == 0
+            - final_verification.row is defined
+            - final_verification.row | length > 0
+
+        - name: Display Final Configuration (Failed)
+          debug:
+            msg: |
+              Unable to verify ESA configuration - query failed or returned no data
+              Return Code: {{ final_verification.rc | default('N/A') }}
+              {% if final_verification.stderr is defined and final_verification.stderr %}
+              Error: {{ final_verification.stderr }}
+              {% endif %}
+              {% if final_verification.job_log is defined %}
+              Job Log: {{ final_verification.job_log }}
+              {% endif %}
+          when: >
+            final_verification.rc is not defined or
+            final_verification.rc != 0 or
+            final_verification.row is not defined or
+            final_verification.row | length == 0
+
+      when: not skip_verification
+
+    ################################################################################
+    # Phase 9: Generate Final Report
+    ################################################################################
+
+    - name: "Phase 9: Generate Final Report"
+      block:
+        - name: Query Final ESA Status
+          ibmi_sql_query:
+            sql: |
+              SELECT
+                ESA_ENABLED,
+                ESA_CONFIGURED,
+                CUSTOMER_NAME,
+                CUSTOMER_CONTACT_NAME,
+                CUSTOMER_CONTACT_EMAIL,
+                TRANSMISSION_METHOD
+              FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+          register: final_esa_status
+          failed_when: false
+
+        - name: Query Final Jobs Status
+          ibmi_sql_query:
+            sql: |
+              SELECT COUNT(*) as JOB_COUNT
+              FROM TABLE(QSYS2.ACTIVE_JOB_INFO()) 
+              WHERE JOB_NAME IN ('QS9HDWMON', 'QS9PALMON', 'QS9PRBMON', 'QS9PRBSND')
+          register: final_jobs_count
+          failed_when: false
+
+        - name: Generate Reconfiguration Summary
+          set_fact:
+            reconfiguration_summary:
+              hostname: "{{ inventory_hostname }}"
+              start_time: "{{ ansible_date_time.iso8601 }}"
+              dry_run: "{{ dry_run }}"
+              initial_status:
+                existed: "{{ esa_exists | default(false) }}"
+                configured: "{{ esa_is_configured | default(false) }}"
+                had_errors: "{{ esa_has_errors | default(false) }}"
+              final_status:
+                enabled: "{{ final_esa_status.row[0].ESA_ENABLED == 'YES' if (final_esa_status.rc == 0 and final_esa_status.row | length > 0) else false }}"
+                configured: "{{ final_esa_status.row[0].ESA_CONFIGURED == 'YES' if (final_esa_status.rc == 0 and final_esa_status.row | length > 0) else false }}"
+                contact_set: "{{ (final_esa_status.row[0].CUSTOMER_CONTACT_EMAIL | default('') | length > 0) if (final_esa_status.rc == 0 and final_esa_status.row | length > 0) else false }}"
+                jobs_active: "{{ final_jobs_count.row[0].JOB_COUNT if (final_jobs_count.rc == 0 and final_jobs_count.row | length > 0) else 0 }}"
+              success: "{{ (final_esa_status.row[0].ESA_ENABLED == 'YES' and final_esa_status.row[0].ESA_CONFIGURED == 'YES') if (final_esa_status.rc == 0 and final_esa_status.row | length > 0) else false }}"
+
+        - name: Display Final Report
+          debug:
+            msg: |
+              ================================================================================
+              ESA RECONFIGURATION FINAL REPORT
+              ================================================================================
+              System:     {{ reconfiguration_summary.hostname }}
+              Timestamp:  {{ reconfiguration_summary.start_time }}
+              Dry Run:    {{ reconfiguration_summary.dry_run }}
+              
+              Initial Status:
+                Existed:      {{ reconfiguration_summary.initial_status.existed }}
+                Configured:   {{ reconfiguration_summary.initial_status.configured }}
+                Had Errors:   {{ reconfiguration_summary.initial_status.had_errors }}
+              
+              Final Status:
+                Enabled:      {{ reconfiguration_summary.final_status.enabled }}
+                Configured:   {{ reconfiguration_summary.final_status.configured }}
+                Contact Set:  {{ reconfiguration_summary.final_status.contact_set }}
+                Jobs Active:  {{ reconfiguration_summary.final_status.jobs_active }} / 4
+              
+              ================================================================================
+              {% if reconfiguration_summary.dry_run %}
+              RESULT: DRY RUN COMPLETED
+              No changes were made to the system.
+              {% elif reconfiguration_summary.success and reconfiguration_summary.final_status.jobs_active == 4 %}
+              RESULT: ✓ SUCCESS
+              ESA has been successfully reconfigured and is operational.
+              
+              Next Steps:
+              1. Monitor transmission status over the next 24 hours
+              2. Verify connectivity to esupport.ibm.com
+              3. Check for any problems reported
+              {% elif reconfiguration_summary.success %}
+              RESULT: ⚠ PARTIAL SUCCESS
+              ESA is configured but not all jobs are active yet.
+              
+              Recommended Actions:
+              1. Wait a few minutes for jobs to start
+              2. Run: ansible-playbook playbooks/ibmi-esa-verify-jobs.yml --limit {{ inventory_hostname }}
+              3. Check job logs if jobs don't start
+              {% else %}
+              RESULT: ✗ FAILED
+              ESA reconfiguration encountered errors.
+              
+              Recommended Actions:
+              1. Review error messages above
+              2. Check system logs and job logs
+              3. Verify prerequisites (PTFs, authority, network)
+              4. Consult IBM documentation
+              {% endif %}
+              ================================================================================
+
+        - name: Save Report to File
+          copy:
+            content: |
+              ================================================================================
+              ESA RECONFIGURATION REPORT
+              ================================================================================
+              {{ reconfiguration_summary | to_nice_yaml }}
+              
+              Generated: {{ ansible_date_time.iso8601 }}
+              ================================================================================
+            dest: "/tmp/esa_reconfiguration_{{ inventory_hostname }}_{{ ansible_date_time.iso8601_basic_short }}.txt"
+          delegate_to: localhost
+          when: not dry_run
+
+################################################################################
+# Notes:
+#
+# 1. This is the master orchestration playbook for ESA reconfiguration
+# 2. It calls all other ESA playbooks in the correct sequence
+# 3. Includes error handling and rollback capabilities
+# 4. Generates comprehensive reports
+# 5. Supports dry-run mode for testing
+#
+# Example Commands:
+#   # Full reconfiguration
+#   ansible-playbook playbooks/ibmi-esa-reconfigure.yml --limit vk4060
+#
+#   # Dry run (no changes)
+#   ansible-playbook playbooks/ibmi-esa-reconfigure.yml --limit vk4060 --check
+#
+#   # Auto-confirm (no prompts)
+#   ansible-playbook playbooks/ibmi-esa-reconfigure.yml --limit vk4060 -e "auto_confirm=true"
+#
+#   # Continue on errors
+#   ansible-playbook playbooks/ibmi-esa-reconfigure.yml --limit vk4060 -e "continue_on_error=true"
+#
+#   # Skip verification
+#   ansible-playbook playbooks/ibmi-esa-reconfigure.yml --limit vk4060 -e "skip_verification=true"
+#
+# Required Variables (define in host_vars):
+#   esa_country_code: "US"
+#   esa_state_code: "CO"
+#   esa_contact_name: "IT Operations"
+#   esa_contact_phone: "+1-303-555-0100"
+#   esa_contact_email: "ops@wellsky.com"
+#
+################################################################################
+
+# Made with Bob

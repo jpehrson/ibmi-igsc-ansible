@@ -1,0 +1,341 @@
+---
+################################################################################
+# IBM i Electronic Service Agent (ESA) - Enable Service Playbook
+#
+# Purpose:
+#   Enable the ESA service using CHGSRVAGTA ENABLE(*YES) command.
+#   This starts the ESA jobs and activates electronic support.
+#
+# Reference:
+#   https://www.ibm.com/support/pages/configuration-instructions-electronic-customer-support-ecs-and-electronic-service-agent-esa-ibm-i
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-enable.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-enable.yml -e "target_env=test"
+#
+# IMPORTANT:
+#   - Requires *SECOFR authority
+#   - ESA must be configured before enabling
+#   - This will start ESA jobs (QS9HDWMON, QS9PALMON, QS9PRBMON, QS9PRBSND)
+#
+################################################################################
+
+- name: Enable IBM i Electronic Service Agent
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  vars:
+    # Wait time for jobs to start (seconds)
+    job_start_wait: "{{ esa_job_start_wait | default(15) }}"
+    
+    # Retry settings
+    max_retries: "{{ esa_enable_max_retries | default(3) }}"
+    retry_delay: "{{ esa_enable_retry_delay | default(10) }}"
+    
+    # Dry run mode
+    dry_run: "{{ ansible_check_mode | default(false) }}"
+
+  tasks:
+    ################################################################################
+    # Pre-enable Checks
+    ################################################################################
+    
+    - name: Check ESA Configuration Status
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED,
+            CUSTOMER_CONTACT_NAME,
+            CUSTOMER_CONTACT_EMAIL
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_preenable_check
+      failed_when: false
+
+    - name: Display Current ESA Status
+      debug:
+        msg: |
+          ================================================================================
+          Pre-Enable ESA Status - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_preenable_check.row | length > 0 %}
+          {% set esa = esa_preenable_check.row[0] %}
+          ESA Enabled:    {{ esa.ESA_ENABLED | default('N/A') }}
+          ESA Configured: {{ esa.ESA_CONFIGURED | default('N/A') }}
+          Contact Name:   {{ esa.CUSTOMER_CONTACT_NAME | default('Not Set') }}
+          Contact Email:  {{ esa.CUSTOMER_CONTACT_EMAIL | default('Not Set') }}
+          
+          {% if esa.ESA_ENABLED == 'YES' %}
+          ⚠ WARNING: ESA is already enabled
+          {% endif %}
+          {% else %}
+          Status: No ESA configuration found
+          {% endif %}
+          ================================================================================
+
+    - name: Fail if ESA Not Configured
+      fail:
+        msg: |
+          ESA is not configured on {{ inventory_hostname }}.
+          Please run ibmi-esa-create.yml and ibmi-esa-configure.yml first.
+      when:
+        - esa_preenable_check.row | length == 0 or esa_preenable_check.row[0].ESA_CONFIGURED != 'YES'
+
+    - name: Check if ESA Already Enabled
+      set_fact:
+        esa_already_enabled: "{{ esa_preenable_check.row[0].ESA_ENABLED == 'YES' if esa_preenable_check.row | length > 0 else false }}"
+
+    - name: Display Already Enabled Warning
+      debug:
+        msg: |
+          ⚠ ESA is already enabled on {{ inventory_hostname }}
+          This playbook will verify the configuration and jobs.
+      when: esa_already_enabled | bool
+
+    ################################################################################
+    # Enable ESA Service
+    ################################################################################
+
+    - name: Enable ESA Service Agent
+      ibmi_cl_command:
+        cmd: "CHGSRVAGTA ENABLE(*YES)"
+      register: enable_esa_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - not esa_already_enabled
+
+    - name: Display ESA Enable Result
+      debug:
+        msg: |
+          ================================================================================
+          ESA Enable Result - {{ inventory_hostname }}
+          ================================================================================
+          {% if dry_run %}
+          DRY RUN MODE - No changes made
+          Command that would be executed: CHGSRVAGTA ENABLE(*YES)
+          {% elif esa_already_enabled %}
+          ESA was already enabled - no action taken
+          {% else %}
+          Return Code: {{ enable_esa_result.rc | default('N/A') }}
+          {% if enable_esa_result.rc == 0 %}
+          Status: ✓ ESA enabled successfully
+          {% else %}
+          Status: ✗ ESA enable failed
+          {% if enable_esa_result.stderr is defined and enable_esa_result.stderr %}
+          Error: {{ enable_esa_result.stderr }}
+          {% endif %}
+          {% if enable_esa_result.stdout is defined and enable_esa_result.stdout %}
+          Output: {{ enable_esa_result.stdout }}
+          {% endif %}
+          {% endif %}
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Handle Common Errors
+    ################################################################################
+
+    - name: Check for CPF1015 Error
+      debug:
+        msg: |
+          ⚠ CPF1015 Error Detected
+          This error may indicate:
+          1. PTF levels need updating
+          2. Configuration issues
+          3. Authority problems
+          
+          Please refer to IBM documentation:
+          "CHGSRVAGTA fails with messages CPF1015 or CPFEF82"
+      when:
+        - not dry_run
+        - enable_esa_result is defined
+        - enable_esa_result.stderr is defined
+        - "'CPF1015' in enable_esa_result.stderr or 'CPFEF82' in enable_esa_result.stderr"
+
+    - name: Fail on Enable Error (Unless Continuing)
+      fail:
+        msg: |
+          ESA enable failed on {{ inventory_hostname }}
+          Return Code: {{ enable_esa_result.rc }}
+          Error: {{ enable_esa_result.stderr | default('Unknown error') }}
+      when:
+        - not dry_run
+        - enable_esa_result is defined
+        - enable_esa_result.rc != 0
+        - not (continue_on_error | default(false))
+        - not esa_already_enabled
+
+    ################################################################################
+    # Wait for Jobs to Start
+    ################################################################################
+
+    - name: Wait for ESA Jobs to Start
+      pause:
+        seconds: "{{ job_start_wait }}"
+      when: 
+        - not dry_run
+        - (enable_esa_result is defined and enable_esa_result.rc == 0) or esa_already_enabled
+
+    ################################################################################
+    # Verify ESA Enabled
+    ################################################################################
+
+    - name: Verify ESA Enabled Status
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED,
+            TRANSMISSION_METHOD,
+            TRANSMISSION_SCHEDULE
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_verify_enabled
+      failed_when: false
+      when: not dry_run
+
+    - name: Display Verification Results
+      debug:
+        msg: |
+          ================================================================================
+          ESA Enable Verification - {{ inventory_hostname }}
+          ================================================================================
+          {% if dry_run %}
+          DRY RUN MODE - Verification skipped
+          {% elif esa_verify_enabled.row | length > 0 %}
+          {% set esa = esa_verify_enabled.row[0] %}
+          ESA Enabled:         {{ esa.ESA_ENABLED | default('N/A') }}
+          ESA Configured:      {{ esa.ESA_CONFIGURED | default('N/A') }}
+          Transmission Method: {{ esa.TRANSMISSION_METHOD | default('N/A') }}
+          Transmission Schedule: {{ esa.TRANSMISSION_SCHEDULE | default('N/A') }}
+          
+          {% if esa.ESA_ENABLED == 'YES' %}
+          Status: ✓ ESA is enabled and ready
+          {% else %}
+          Status: ⚠ ESA enable verification failed
+          {% endif %}
+          {% else %}
+          Status: ⚠ Unable to verify ESA status
+          {% endif %}
+          ================================================================================
+      when: esa_verify_enabled is defined or dry_run
+
+    ################################################################################
+    # Check ESA Jobs
+    ################################################################################
+
+    - name: Check ESA Jobs Status
+      ibmi_sql_query:
+        sql: |
+          SELECT 
+            JOB_NAME,
+            JOB_STATUS,
+            JOB_TYPE,
+            SUBSYSTEM,
+            AUTHORIZATION_NAME
+          FROM TABLE(QSYS2.ACTIVE_JOB_INFO()) 
+          WHERE JOB_NAME IN ('QS9HDWMON', 'QS9PALMON', 'QS9PRBMON', 'QS9PRBSND')
+          ORDER BY JOB_NAME
+      register: esa_jobs_check
+      failed_when: false
+      when: not dry_run
+
+    - name: Display ESA Jobs Status
+      debug:
+        msg: |
+          ================================================================================
+          ESA Jobs Status - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_jobs_check.row | length > 0 %}
+          {% for job in esa_jobs_check.row %}
+          {{ job.JOB_NAME }}: {{ job.JOB_STATUS }} ({{ job.SUBSYSTEM }})
+          {% endfor %}
+          
+          Total Active Jobs: {{ esa_jobs_check.row | length }} / 4
+          
+          {% if esa_jobs_check.row | length == 4 %}
+          Status: ✓ All required ESA jobs are active
+          {% else %}
+          Status: ⚠ Not all ESA jobs are active
+          Missing jobs may start shortly. Run ibmi-esa-verify-jobs.yml to check again.
+          {% endif %}
+          {% else %}
+          Status: ⚠ No ESA jobs found
+          Jobs may still be starting. Wait a few moments and check again.
+          {% endif %}
+          ================================================================================
+      when: esa_jobs_check is defined
+
+    ################################################################################
+    # Summary Report
+    ################################################################################
+
+    - name: Generate Enable Summary
+      set_fact:
+        enable_summary:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          dry_run: "{{ dry_run }}"
+          was_already_enabled: "{{ esa_already_enabled }}"
+          enable_successful: "{{ enable_esa_result.rc == 0 if enable_esa_result is defined else esa_already_enabled }}"
+          verification_passed: "{{ esa_verify_enabled.row[0].ESA_ENABLED == 'YES' if (esa_verify_enabled is defined and esa_verify_enabled.row | length > 0) else false }}"
+          jobs_active: "{{ esa_jobs_check.row | length if esa_jobs_check is defined else 0 }}"
+          all_jobs_active: "{{ esa_jobs_check.row | length == 4 if esa_jobs_check is defined else false }}"
+
+    - name: Display Enable Summary
+      debug:
+        msg: |
+          ================================================================================
+          ESA Enable Summary - {{ inventory_hostname }}
+          ================================================================================
+          Timestamp:           {{ enable_summary.timestamp }}
+          Dry Run Mode:        {{ enable_summary.dry_run }}
+          Was Already Enabled: {{ enable_summary.was_already_enabled }}
+          Enable Successful:   {{ enable_summary.enable_successful }}
+          Verification Passed: {{ enable_summary.verification_passed }}
+          Jobs Active:         {{ enable_summary.jobs_active }} / 4
+          All Jobs Active:     {{ enable_summary.all_jobs_active }}
+          
+          {% if enable_summary.dry_run %}
+          Status: DRY RUN - No changes made
+          {% elif enable_summary.verification_passed and enable_summary.all_jobs_active %}
+          Status: ✓ ESA enabled successfully and all jobs are active
+          Next Steps:
+          1. Monitor transmission status
+          2. Check for any problems reported
+          3. Verify connectivity to esupport.ibm.com
+          {% elif enable_summary.verification_passed %}
+          Status: ⚠ ESA enabled but not all jobs are active yet
+          Recommendation: Wait a few minutes and run ibmi-esa-verify-jobs.yml
+          {% else %}
+          Status: ✗ ESA enable verification failed
+          Recommendation: Review errors and check configuration
+          {% endif %}
+          ================================================================================
+
+################################################################################
+# Notes:
+#
+# 1. This playbook requires *SECOFR authority
+# 2. ESA must be configured before enabling
+# 3. CHGSRVAGTA ENABLE(*YES) starts ESA jobs
+# 4. Jobs may take a few moments to start
+# 5. Run ibmi-esa-verify-jobs.yml to verify all jobs are active
+# 6. Run ibmi-esa-verify-config.yml to verify complete configuration
+#
+# Example Commands:
+#   ansible-playbook playbooks/ibmi-esa-enable.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-enable.yml -e "target_env=test"
+#   ansible-playbook playbooks/ibmi-esa-enable.yml --limit vk4060 --check
+#
+# Required Jobs (should be active after enable):
+#   - QS9HDWMON: Hardware monitoring
+#   - QS9PALMON: PAL monitoring
+#   - QS9PRBMON: Problem monitoring
+#   - QS9PRBSND: Problem sending
+#
+################################################################################
+
+# Made with Bob

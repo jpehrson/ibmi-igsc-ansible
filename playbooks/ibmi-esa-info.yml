@@ -1,0 +1,255 @@
+---
+################################################################################
+# IBM i Electronic Service Agent (ESA) Information Query Playbook
+#
+# Purpose:
+#   Query QSYS2.ELECTRONIC_SERVICE_AGENT_INFO to retrieve ESA configuration
+#   and status information for IBM i systems.
+#
+# Reference:
+#   https://www.ibm.com/support/pages/node/6573035
+#
+# QSYS2.ELECTRONIC_SERVICE_AGENT_INFO provides:
+#   - ESA enablement status
+#   - Configuration details
+#   - Contact information
+#   - Transmission settings
+#   - Last transmission timestamp
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-info.yml
+#   ansible-playbook playbooks/ibmi-esa-info.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-info.yml -e "output_format=json"
+#
+################################################################################
+
+- name: Query IBM i Electronic Service Agent Information
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  vars:
+    # Output format: table, json, or yaml
+    output_format: "{{ lookup('env', 'OUTPUT_FORMAT') | default('table', true) }}"
+    # Save results to file
+    save_to_file: false
+    output_file: "/tmp/esa_info_{{ inventory_hostname }}_{{ ansible_date_time.iso8601_basic_short }}.txt"
+
+  tasks:
+    - name: Query Electronic Service Agent Information
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_STATUS,
+            ESA_CONNECTION,
+            PROXY_HOST_OR_IP,
+            PROXY_PORT,
+            PROXY_ID,
+            RESULT_BY_IP_ADDRESS,
+            RESULT_BY_HOSTNAME,
+            SERVER_TYPE,
+            SERVER_HOSTNAME,
+            SERVER_IP_ADDRESS,
+            SERVER_PORT
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_info_result
+      failed_when: false
+
+    - name: Check if ESA information was retrieved
+      debug:
+        msg: "ESA query completed with return code: {{ esa_info_result.rc }}"
+
+    - name: Display ESA Information (Table Format)
+      debug:
+        msg: |
+          ================================================================================
+          Electronic Service Agent Information - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_info_result.row | length > 0 %}
+          {% set esa = esa_info_result.row[0] %}
+          ESA Status:
+            Status:               {{ esa.ESA_STATUS | default('N/A') }}
+            Connection:           {{ esa.ESA_CONNECTION | default('N/A') }}
+          
+          Connection Test Results:
+            By IP Address:        {{ esa.RESULT_BY_IP_ADDRESS | default('N/A') }}
+            By Hostname:          {{ esa.RESULT_BY_HOSTNAME | default('N/A') }}
+          
+          Server Configuration:
+            Server Type:          {{ esa.SERVER_TYPE | default('N/A') }}
+            Server Hostname:      {{ esa.SERVER_HOSTNAME | default('N/A') }}
+            Server IP Address:    {{ esa.SERVER_IP_ADDRESS | default('N/A') }}
+            Server Port:          {{ esa.SERVER_PORT | default('N/A') }}
+          
+          Proxy Configuration:
+            Proxy Host/IP:        {{ esa.PROXY_HOST_OR_IP | default('N/A') }}
+            Proxy Port:           {{ esa.PROXY_PORT | default('N/A') }}
+            Proxy ID:             {{ esa.PROXY_ID | default('N/A') }}
+          ================================================================================
+          {% else %}
+          No ESA information found. ESA may not be configured on this system.
+          ================================================================================
+          {% endif %}
+      when:
+        - esa_info_result.rc == 0
+        - output_format == 'table'
+
+    - name: Display ESA Information (JSON Format)
+      debug:
+        var: esa_info_result.row
+      when: 
+        - esa_info_result.rc == 0
+        - output_format == 'json'
+
+    - name: Display ESA Information (YAML Format)
+      debug:
+        msg: "{{ esa_info_result.row | to_nice_yaml }}"
+      when: 
+        - esa_info_result.rc == 0
+        - output_format == 'yaml'
+
+    - name: Save ESA Information to File
+      copy:
+        content: |
+          ================================================================================
+          Electronic Service Agent Information - {{ inventory_hostname }}
+          Query Date: {{ ansible_date_time.iso8601 }}
+          ================================================================================
+          
+          {{ esa_info_result.row | to_nice_yaml }}
+          
+          ================================================================================
+          Raw SQL Result:
+          ================================================================================
+          Return Code: {{ esa_info_result.rc }}
+          Row Count: {{ esa_info_result.row | length }}
+          
+          {% if esa_info_result.stderr is defined and esa_info_result.stderr %}
+          Errors:
+          {{ esa_info_result.stderr }}
+          {% endif %}
+        dest: "{{ output_file }}"
+      when: 
+        - save_to_file | bool
+        - esa_info_result.rc == 0
+      delegate_to: localhost
+
+    - name: Handle Query Errors
+      debug:
+        msg: |
+          ================================================================================
+          ERROR: Failed to query ESA information
+          ================================================================================
+          Return Code: {{ esa_info_result.rc }}
+          
+          {% if esa_info_result.stderr is defined %}
+          Error Message:
+          {{ esa_info_result.stderr }}
+          {% endif %}
+          
+          {% if esa_info_result.job_log is defined %}
+          Job Log:
+          {{ esa_info_result.job_log | to_nice_yaml }}
+          {% endif %}
+          
+          Possible Causes:
+          - User lacks authority to QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+          - ESA is not installed or configured
+          - SQL services are not available
+          ================================================================================
+      when: esa_info_result.rc != 0
+
+    - name: ESA Status Summary
+      debug:
+        msg: |
+          ================================================================================
+          ESA Quick Status - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_info_result.rc == 0 and esa_info_result.row | length > 0 %}
+          {% set esa = esa_info_result.row[0] %}
+          ESA Status:      {{ esa.ESA_STATUS | default('UNKNOWN') }}
+          Connection:      {{ esa.ESA_CONNECTION | default('UNKNOWN') }}
+          Server:          {{ esa.SERVER_HOSTNAME | default('N/A') }}:{{ esa.SERVER_PORT | default('N/A') }}
+          Test by IP:      {{ esa.RESULT_BY_IP_ADDRESS | default('N/A') }}
+          Test by Host:    {{ esa.RESULT_BY_HOSTNAME | default('N/A') }}
+          {% else %}
+          Status: Unable to retrieve ESA information
+          {% endif %}
+          ================================================================================
+      when: esa_info_result.rc == 0
+
+################################################################################
+# Additional ESA-Related Queries (Optional)
+#
+# Note: QSYS2.PROBLEM_LOG may not be available on all IBM i systems.
+# Uncomment the tasks below if you want to query problem logs.
+################################################################################
+
+    # - name: Query ESA Problem Log (if available)
+    #   ibmi_sql_query:
+    #     sql: |
+    #       SELECT
+    #         PROBLEM_ID,
+    #         PROBLEM_STATUS,
+    #         PROBLEM_SEVERITY,
+    #         PROBLEM_SUMMARY,
+    #         PROBLEM_TIMESTAMP
+    #       FROM QSYS2.PROBLEM_LOG
+    #       WHERE PROBLEM_TIMESTAMP >= CURRENT_DATE - 30 DAYS
+    #       ORDER BY PROBLEM_TIMESTAMP DESC
+    #       FETCH FIRST 10 ROWS ONLY
+    #   register: esa_problems
+    #   failed_when: false
+    #   when: esa_info_result.rc == 0
+
+    # - name: Display Recent Problems
+    #   debug:
+    #     msg: |
+    #       ================================================================================
+    #       Recent Problems (Last 30 Days) - {{ inventory_hostname }}
+    #       ================================================================================
+    #       {% if esa_problems.row | length > 0 %}
+    #       {% for problem in esa_problems.row %}
+    #       Problem ID:   {{ problem.PROBLEM_ID }}
+    #       Status:       {{ problem.PROBLEM_STATUS }}
+    #       Severity:     {{ problem.PROBLEM_SEVERITY }}
+    #       Summary:      {{ problem.PROBLEM_SUMMARY }}
+    #       Timestamp:    {{ problem.PROBLEM_TIMESTAMP }}
+    #       --------------------------------------------------------------------------------
+    #       {% endfor %}
+    #       {% else %}
+    #       No recent problems found or PROBLEM_LOG not available.
+    #       {% endif %}
+    #       ================================================================================
+    #   when:
+    #     - esa_problems is defined
+    #     - esa_problems.rc is defined
+    #     - esa_problems.rc == 0
+
+################################################################################
+# Notes:
+#
+# 1. QSYS2.ELECTRONIC_SERVICE_AGENT_INFO provides ESA connection and status info
+# 2. Requires *READ authority to the view
+# 3. ESA must be configured for data to be available
+# 4. Column structure may vary by IBM i version and PTF level
+# 5. Use ibmi-esa-discover-columns.yml to discover available columns
+# 6. Use -e "output_format=json" for JSON output
+# 7. Use -e "save_to_file=true" to save results to a file
+#
+# Available Columns (as of this system):
+#   - ESA_STATUS, ESA_CONNECTION
+#   - PROXY_HOST_OR_IP, PROXY_PORT, PROXY_ID
+#   - RESULT_BY_IP_ADDRESS, RESULT_BY_HOSTNAME
+#   - SERVER_TYPE, SERVER_HOSTNAME, SERVER_IP_ADDRESS, SERVER_PORT
+#
+# Example Commands:
+#   ansible-playbook playbooks/ibmi-esa-info.yml
+#   ansible-playbook playbooks/ibmi-esa-info.yml -e "output_format=json"
+#   ansible-playbook playbooks/ibmi-esa-info.yml -e "save_to_file=true"
+#   ansible-playbook playbooks/ibmi-esa-info.yml --limit vk4060
+#
+################################################################################
+
+# Made with Bob

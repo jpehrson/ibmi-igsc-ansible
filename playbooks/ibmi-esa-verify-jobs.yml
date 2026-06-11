@@ -1,0 +1,377 @@
+---
+################################################################################
+# IBM i Electronic Service Agent (ESA) - Verify Jobs Playbook
+#
+# Purpose:
+#   Verify that all required ESA jobs are active and running properly.
+#   Required jobs: QS9HDWMON, QS9PALMON, QS9PRBMON, QS9PRBSND
+#
+# Reference:
+#   https://www.ibm.com/support/pages/configuration-instructions-electronic-customer-support-ecs-and-electronic-service-agent-esa-ibm-i
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-verify-jobs.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-verify-jobs.yml -e "target_env=test"
+#
+################################################################################
+
+- name: Verify IBM i Electronic Service Agent Jobs
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  vars:
+    # Required ESA jobs
+    required_jobs:
+      - QS9HDWMON
+      - QS9PALMON
+      - QS9PRBMON
+      - QS9PRBSND
+    
+    # Optional job (only for standalone partition over Power 8+)
+    optional_jobs:
+      - QS9UAK
+    
+    # Expected subsystem
+    expected_subsystem: QSYSWRK
+
+  tasks:
+    ################################################################################
+    # Check ESA Status
+    ################################################################################
+    
+    - name: Check ESA Enabled Status
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_status_check
+      failed_when: false
+
+    - name: Display ESA Status
+      debug:
+        msg: |
+          ================================================================================
+          ESA Status - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_status_check.row | length > 0 %}
+          {% set esa = esa_status_check.row[0] %}
+          ESA Enabled:    {{ esa.ESA_ENABLED | default('N/A') }}
+          ESA Configured: {{ esa.ESA_CONFIGURED | default('N/A') }}
+          
+          {% if esa.ESA_ENABLED != 'YES' %}
+          ⚠ WARNING: ESA is not enabled
+          Run ibmi-esa-enable.yml to enable ESA
+          {% endif %}
+          {% else %}
+          ⚠ WARNING: No ESA configuration found
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Query Active ESA Jobs
+    ################################################################################
+
+    - name: Query Active ESA Jobs
+      ibmi_sql_query:
+        sql: |
+          SELECT 
+            JOB_NAME,
+            JOB_STATUS,
+            JOB_TYPE,
+            SUBSYSTEM,
+            AUTHORIZATION_NAME,
+            JOB_ACTIVE_TIME,
+            CPU_TIME,
+            FUNCTION
+          FROM TABLE(QSYS2.ACTIVE_JOB_INFO()) 
+          WHERE JOB_NAME LIKE 'QS9%'
+          ORDER BY JOB_NAME
+      register: esa_jobs_query
+      failed_when: false
+
+    - name: Display All ESA Jobs
+      debug:
+        msg: |
+          ================================================================================
+          All ESA Jobs - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_jobs_query.row | length > 0 %}
+          {% for job in esa_jobs_query.row %}
+          Job: {{ job.JOB_NAME }}
+            Status:       {{ job.JOB_STATUS }}
+            Subsystem:    {{ job.SUBSYSTEM }}
+            User:         {{ job.AUTHORIZATION_NAME }}
+            Active Time:  {{ job.JOB_ACTIVE_TIME }}
+            Function:     {{ job.FUNCTION | default('N/A') }}
+          {% endfor %}
+          
+          Total ESA Jobs Found: {{ esa_jobs_query.row | length }}
+          {% else %}
+          No ESA jobs found
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Verify Required Jobs
+    ################################################################################
+
+    - name: Check Required Jobs Status
+      set_fact:
+        found_jobs: "{{ esa_jobs_query.row | map(attribute='JOB_NAME') | list }}"
+      when: esa_jobs_query.row | length > 0
+
+    - name: Set Empty Jobs List
+      set_fact:
+        found_jobs: []
+      when: esa_jobs_query.row | length == 0
+
+    - name: Identify Missing Required Jobs
+      set_fact:
+        missing_jobs: "{{ required_jobs | difference(found_jobs) }}"
+
+    - name: Identify Active Required Jobs
+      set_fact:
+        active_jobs: "{{ required_jobs | intersect(found_jobs) }}"
+
+    - name: Display Required Jobs Status
+      debug:
+        msg: |
+          ================================================================================
+          Required Jobs Status - {{ inventory_hostname }}
+          ================================================================================
+          Required Jobs (4):
+          {% for job in required_jobs %}
+          - {{ job }}: {{ 'ACTIVE ✓' if job in found_jobs else 'MISSING ✗' }}
+          {% endfor %}
+          
+          Summary:
+            Active:  {{ active_jobs | length }} / {{ required_jobs | length }}
+            Missing: {{ missing_jobs | length }}
+          
+          {% if missing_jobs | length == 0 %}
+          Status: ✓ All required ESA jobs are active
+          {% else %}
+          Status: ✗ Some required jobs are missing
+          Missing Jobs: {{ missing_jobs | join(', ') }}
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Check Optional Jobs
+    ################################################################################
+
+    - name: Check Optional Jobs
+      set_fact:
+        optional_jobs_found: "{{ optional_jobs | intersect(found_jobs) }}"
+
+    - name: Display Optional Jobs Status
+      debug:
+        msg: |
+          ================================================================================
+          Optional Jobs Status - {{ inventory_hostname }}
+          ================================================================================
+          Optional Jobs:
+          {% for job in optional_jobs %}
+          - {{ job }}: {{ 'ACTIVE' if job in found_jobs else 'NOT ACTIVE' }}
+          {% endfor %}
+          
+          Note: QS9UAK is only required for standalone partition over Power 8 or higher
+          {% if 'QS9UAK' not in found_jobs %}
+          If this is a standalone partition over Power 8+, QS9UAK should be active.
+          Otherwise, this is normal.
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Check Job Details
+    ################################################################################
+
+    - name: Query Detailed Job Information
+      ibmi_sql_query:
+        sql: |
+          SELECT 
+            JOB_NAME,
+            JOB_STATUS,
+            SUBSYSTEM,
+            MEMORY_POOL,
+            THREAD_COUNT,
+            TEMPORARY_STORAGE,
+            CPU_TIME,
+            TOTAL_DISK_IO_COUNT
+          FROM TABLE(QSYS2.ACTIVE_JOB_INFO()) 
+          WHERE JOB_NAME IN ('QS9HDWMON', 'QS9PALMON', 'QS9PRBMON', 'QS9PRBSND')
+          ORDER BY JOB_NAME
+      register: esa_jobs_detail
+      failed_when: false
+      when: active_jobs | length > 0
+
+    - name: Display Job Details
+      debug:
+        msg: |
+          ================================================================================
+          ESA Job Details - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_jobs_detail is defined and esa_jobs_detail.row | length > 0 %}
+          {% for job in esa_jobs_detail.row %}
+          {{ job.JOB_NAME }}:
+            Status:        {{ job.JOB_STATUS }}
+            Subsystem:     {{ job.SUBSYSTEM }}
+            Memory Pool:   {{ job.MEMORY_POOL }}
+            Threads:       {{ job.THREAD_COUNT }}
+            CPU Time:      {{ job.CPU_TIME }}
+            Disk I/O:      {{ job.TOTAL_DISK_IO_COUNT }}
+          {% endfor %}
+          {% else %}
+          No detailed job information available
+          {% endif %}
+          ================================================================================
+      when: esa_jobs_detail is defined
+
+    ################################################################################
+    # Check Subsystem
+    ################################################################################
+
+    - name: Verify Jobs in Correct Subsystem
+      set_fact:
+        jobs_in_wrong_subsystem: "{{ esa_jobs_query.row | selectattr('SUBSYSTEM', '!=', expected_subsystem) | map(attribute='JOB_NAME') | list }}"
+      when: esa_jobs_query.row | length > 0
+
+    - name: Display Subsystem Verification
+      debug:
+        msg: |
+          ================================================================================
+          Subsystem Verification - {{ inventory_hostname }}
+          ================================================================================
+          Expected Subsystem: {{ expected_subsystem }}
+          
+          {% if jobs_in_wrong_subsystem is defined and jobs_in_wrong_subsystem | length > 0 %}
+          ⚠ WARNING: Some jobs are not in the expected subsystem
+          Jobs in wrong subsystem: {{ jobs_in_wrong_subsystem | join(', ') }}
+          {% else %}
+          ✓ All ESA jobs are in the correct subsystem ({{ expected_subsystem }})
+          {% endif %}
+          ================================================================================
+      when: esa_jobs_query.row | length > 0
+
+    ################################################################################
+    # Troubleshooting Information
+    ################################################################################
+
+    - name: Display Troubleshooting Information
+      debug:
+        msg: |
+          ================================================================================
+          Troubleshooting Information - {{ inventory_hostname }}
+          ================================================================================
+          {% if missing_jobs | length > 0 %}
+          Missing Jobs: {{ missing_jobs | join(', ') }}
+          
+          Possible Causes:
+          1. ESA is not enabled (run ibmi-esa-enable.yml)
+          2. Jobs failed to start (check job logs)
+          3. Subsystem QSYSWRK is not active
+          4. Authority issues
+          
+          Troubleshooting Steps:
+          1. Check if ESA is enabled:
+             SELECT ESA_ENABLED FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+          
+          2. Check subsystem status:
+             WRKSBSJOB SBS(QSYSWRK)
+          
+          3. Check job logs:
+             WRKJOB JOB({{ missing_jobs[0] }})
+          
+          4. Try re-enabling ESA:
+             CHGSRVAGTA ENABLE(*NO)
+             CHGSRVAGTA ENABLE(*YES)
+          
+          5. Check for errors in QSYSOPR message queue:
+             DSPMSG QSYSOPR
+          {% else %}
+          ✓ All required jobs are active - no troubleshooting needed
+          {% endif %}
+          ================================================================================
+      when: missing_jobs | length > 0
+
+    ################################################################################
+    # Summary Report
+    ################################################################################
+
+    - name: Generate Verification Summary
+      set_fact:
+        verification_summary:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          esa_enabled: "{{ esa_status_check.row[0].ESA_ENABLED if esa_status_check.row | length > 0 else 'UNKNOWN' }}"
+          total_jobs_found: "{{ esa_jobs_query.row | length }}"
+          required_jobs_active: "{{ active_jobs | length }}"
+          required_jobs_total: "{{ required_jobs | length }}"
+          missing_jobs: "{{ missing_jobs }}"
+          all_jobs_active: "{{ missing_jobs | length == 0 }}"
+          jobs_in_correct_subsystem: "{{ (jobs_in_wrong_subsystem is not defined) or (jobs_in_wrong_subsystem | length == 0) }}"
+
+    - name: Display Verification Summary
+      debug:
+        msg: |
+          ================================================================================
+          ESA Jobs Verification Summary - {{ inventory_hostname }}
+          ================================================================================
+          Timestamp:                {{ verification_summary.timestamp }}
+          ESA Enabled:              {{ verification_summary.esa_enabled }}
+          Total ESA Jobs Found:     {{ verification_summary.total_jobs_found }}
+          Required Jobs Active:     {{ verification_summary.required_jobs_active }} / {{ verification_summary.required_jobs_total }}
+          All Required Jobs Active: {{ verification_summary.all_jobs_active }}
+          Jobs in Correct Subsystem: {{ verification_summary.jobs_in_correct_subsystem }}
+          
+          {% if verification_summary.all_jobs_active and verification_summary.jobs_in_correct_subsystem %}
+          Status: ✓ ESA jobs verification PASSED
+          All required jobs are active and running correctly.
+          {% elif not verification_summary.all_jobs_active %}
+          Status: ✗ ESA jobs verification FAILED
+          Missing Jobs: {{ verification_summary.missing_jobs | join(', ') }}
+          Action Required: Review troubleshooting information above
+          {% else %}
+          Status: ⚠ ESA jobs verification WARNING
+          Jobs are active but may have configuration issues
+          {% endif %}
+          ================================================================================
+
+    - name: Fail if Required Jobs Missing
+      fail:
+        msg: |
+          ESA jobs verification failed on {{ inventory_hostname }}
+          Missing required jobs: {{ missing_jobs | join(', ') }}
+          Please review the troubleshooting information above.
+      when:
+        - missing_jobs | length > 0
+        - fail_on_missing_jobs | default(false)
+
+################################################################################
+# Notes:
+#
+# 1. This playbook verifies all required ESA jobs are active
+# 2. Required jobs: QS9HDWMON, QS9PALMON, QS9PRBMON, QS9PRBSND
+# 3. Optional job QS9UAK (only for standalone partition over Power 8+)
+# 4. Jobs should be in QSYSWRK subsystem
+# 5. Use -e "fail_on_missing_jobs=true" to fail if jobs are missing
+#
+# Example Commands:
+#   ansible-playbook playbooks/ibmi-esa-verify-jobs.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-verify-jobs.yml -e "target_env=test"
+#   ansible-playbook playbooks/ibmi-esa-verify-jobs.yml --limit vk4060 -e "fail_on_missing_jobs=true"
+#
+# Job Descriptions:
+#   QS9HDWMON - Hardware monitoring job
+#   QS9PALMON - PAL (Product Activity Log) monitoring job
+#   QS9PRBMON - Problem monitoring job
+#   QS9PRBSND - Problem sending job
+#   QS9UAK    - Update Access Key job (optional)
+#
+################################################################################
+
+# Made with Bob

@@ -1,0 +1,404 @@
+---
+################################################################################
+# IBM i Electronic Service Agent (ESA) - Verify Configuration Playbook
+#
+# Purpose:
+#   Comprehensive verification of ESA configuration including status,
+#   contact information, transmission settings, and recent activity.
+#
+# Reference:
+#   https://www.ibm.com/support/pages/configuration-instructions-electronic-customer-support-ecs-and-electronic-service-agent-esa-ibm-i
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-verify-config.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-verify-config.yml -e "target_env=test"
+#
+################################################################################
+
+- name: Verify IBM i Electronic Service Agent Configuration
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  vars:
+    # Verification criteria
+    check_transmission: "{{ esa_check_transmission | default(true) }}"
+    check_recent_problems: "{{ esa_check_recent_problems | default(true) }}"
+    days_back: "{{ esa_days_back | default(30) }}"
+    
+    # Fail on errors
+    fail_on_errors: "{{ esa_fail_on_errors | default(false) }}"
+
+  tasks:
+    ################################################################################
+    # Query Complete ESA Configuration
+    ################################################################################
+    
+    - name: Query Complete ESA Configuration
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED,
+            CUSTOMER_NUMBER,
+            CUSTOMER_NAME,
+            CUSTOMER_COUNTRY,
+            CUSTOMER_CONTACT_NAME,
+            CUSTOMER_CONTACT_PHONE,
+            CUSTOMER_CONTACT_EMAIL,
+            SYSTEM_CONTACT_NAME,
+            SYSTEM_CONTACT_PHONE,
+            SYSTEM_CONTACT_EMAIL,
+            ALTERNATE_CONTACT_NAME,
+            ALTERNATE_CONTACT_PHONE,
+            ALTERNATE_CONTACT_EMAIL,
+            TRANSMISSION_METHOD,
+            TRANSMISSION_SCHEDULE,
+            LAST_TRANSMISSION_TIMESTAMP,
+            LAST_TRANSMISSION_STATUS,
+            PROXY_SERVER,
+            PROXY_PORT,
+            TESTMODE_ENABLED
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_full_config
+      failed_when: false
+
+    - name: Display Complete ESA Configuration
+      debug:
+        msg: |
+          ================================================================================
+          Complete ESA Configuration - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_full_config.row | length > 0 %}
+          {% set esa = esa_full_config.row[0] %}
+          
+          ESA Status:
+            Enabled:              {{ esa.ESA_ENABLED | default('N/A') }}
+            Configured:           {{ esa.ESA_CONFIGURED | default('N/A') }}
+            Test Mode:            {{ esa.TESTMODE_ENABLED | default('N/A') }}
+          
+          Customer Information:
+            Customer Number:      {{ esa.CUSTOMER_NUMBER | default('Not Set') }}
+            Customer Name:        {{ esa.CUSTOMER_NAME | default('Not Set') }}
+            Country:              {{ esa.CUSTOMER_COUNTRY | default('Not Set') }}
+          
+          Primary Contact:
+            Name:                 {{ esa.CUSTOMER_CONTACT_NAME | default('Not Set') }}
+            Phone:                {{ esa.CUSTOMER_CONTACT_PHONE | default('Not Set') }}
+            Email:                {{ esa.CUSTOMER_CONTACT_EMAIL | default('Not Set') }}
+          
+          {% if esa.SYSTEM_CONTACT_NAME %}
+          System Contact:
+            Name:                 {{ esa.SYSTEM_CONTACT_NAME }}
+            Phone:                {{ esa.SYSTEM_CONTACT_PHONE }}
+            Email:                {{ esa.SYSTEM_CONTACT_EMAIL }}
+          {% endif %}
+          
+          {% if esa.ALTERNATE_CONTACT_NAME %}
+          Alternate Contact:
+            Name:                 {{ esa.ALTERNATE_CONTACT_NAME }}
+            Phone:                {{ esa.ALTERNATE_CONTACT_PHONE }}
+            Email:                {{ esa.ALTERNATE_CONTACT_EMAIL }}
+          {% endif %}
+          
+          Transmission Settings:
+            Method:               {{ esa.TRANSMISSION_METHOD | default('Not Set') }}
+            Schedule:             {{ esa.TRANSMISSION_SCHEDULE | default('Not Set') }}
+            Last Transmission:    {{ esa.LAST_TRANSMISSION_TIMESTAMP | default('Never') }}
+            Last Status:          {{ esa.LAST_TRANSMISSION_STATUS | default('N/A') }}
+          
+          {% if esa.PROXY_SERVER %}
+          Proxy Configuration:
+            Proxy Server:         {{ esa.PROXY_SERVER }}
+            Proxy Port:           {{ esa.PROXY_PORT }}
+          {% endif %}
+          {% else %}
+          ⚠ No ESA configuration found
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Verify Configuration Completeness
+    ################################################################################
+
+    - name: Check Configuration Completeness
+      set_fact:
+        config_checks:
+          esa_enabled: "{{ esa_full_config.row[0].ESA_ENABLED == 'YES' if esa_full_config.row | length > 0 else false }}"
+          esa_configured: "{{ esa_full_config.row[0].ESA_CONFIGURED == 'YES' if esa_full_config.row | length > 0 else false }}"
+          has_customer_info: "{{ (esa_full_config.row[0].CUSTOMER_NAME | default('') | length > 0) if esa_full_config.row | length > 0 else false }}"
+          has_contact_info: "{{ (esa_full_config.row[0].CUSTOMER_CONTACT_EMAIL | default('') | length > 0) if esa_full_config.row | length > 0 else false }}"
+          has_transmission_method: "{{ (esa_full_config.row[0].TRANSMISSION_METHOD | default('') | length > 0) if esa_full_config.row | length > 0 else false }}"
+          last_transmission_ok: "{{ (esa_full_config.row[0].LAST_TRANSMISSION_STATUS | default('') == 'SUCCESS') if esa_full_config.row | length > 0 else false }}"
+      when: esa_full_config.row | length > 0
+
+    - name: Display Configuration Checks
+      debug:
+        msg: |
+          ================================================================================
+          Configuration Verification Checks - {{ inventory_hostname }}
+          ================================================================================
+          {% if config_checks is defined %}
+          ✓ ESA Enabled:              {{ config_checks.esa_enabled }}
+          ✓ ESA Configured:           {{ config_checks.esa_configured }}
+          ✓ Customer Info Set:        {{ config_checks.has_customer_info }}
+          ✓ Contact Info Set:         {{ config_checks.has_contact_info }}
+          ✓ Transmission Method Set:  {{ config_checks.has_transmission_method }}
+          ✓ Last Transmission OK:     {{ config_checks.last_transmission_ok }}
+          
+          Overall Status: {{ 'PASS ✓' if (config_checks.esa_enabled and config_checks.esa_configured and config_checks.has_contact_info) else 'FAIL ✗' }}
+          {% else %}
+          ⚠ Unable to perform configuration checks
+          {% endif %}
+          ================================================================================
+      when: config_checks is defined
+
+    ################################################################################
+    # Check ESA Jobs
+    ################################################################################
+
+    - name: Query ESA Jobs Status
+      ibmi_sql_query:
+        sql: |
+          SELECT 
+            JOB_NAME,
+            JOB_STATUS
+          FROM TABLE(QSYS2.ACTIVE_JOB_INFO()) 
+          WHERE JOB_NAME IN ('QS9HDWMON', 'QS9PALMON', 'QS9PRBMON', 'QS9PRBSND')
+          ORDER BY JOB_NAME
+      register: esa_jobs_status
+      failed_when: false
+
+    - name: Check Jobs Status
+      set_fact:
+        all_jobs_active: "{{ esa_jobs_status.row | length == 4 }}"
+      when: esa_jobs_status.rc == 0
+
+    - name: Display Jobs Status
+      debug:
+        msg: |
+          ================================================================================
+          ESA Jobs Status - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_jobs_status.row | length > 0 %}
+          Active Jobs: {{ esa_jobs_status.row | length }} / 4
+          {% for job in esa_jobs_status.row %}
+          - {{ job.JOB_NAME }}: {{ job.JOB_STATUS }}
+          {% endfor %}
+          
+          Status: {{ 'All jobs active ✓' if all_jobs_active else 'Some jobs missing ✗' }}
+          {% else %}
+          ⚠ No ESA jobs found
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Check Recent Transmissions
+    ################################################################################
+
+    - name: Check Recent Transmission Status
+      set_fact:
+        transmission_info:
+          last_timestamp: "{{ esa_full_config.row[0].LAST_TRANSMISSION_TIMESTAMP | default('Never') }}"
+          last_status: "{{ esa_full_config.row[0].LAST_TRANSMISSION_STATUS | default('N/A') }}"
+          transmission_ok: "{{ esa_full_config.row[0].LAST_TRANSMISSION_STATUS == 'SUCCESS' if esa_full_config.row | length > 0 else false }}"
+      when: 
+        - check_transmission | bool
+        - esa_full_config.row | length > 0
+
+    - name: Display Transmission Status
+      debug:
+        msg: |
+          ================================================================================
+          Transmission Status - {{ inventory_hostname }}
+          ================================================================================
+          {% if transmission_info is defined %}
+          Last Transmission: {{ transmission_info.last_timestamp }}
+          Last Status:       {{ transmission_info.last_status }}
+          
+          {% if transmission_info.transmission_ok %}
+          Status: ✓ Last transmission successful
+          {% elif transmission_info.last_timestamp == 'Never' %}
+          Status: ⚠ No transmissions yet (this is normal for new configurations)
+          {% else %}
+          Status: ✗ Last transmission failed
+          Action Required: Check network connectivity and configuration
+          {% endif %}
+          {% else %}
+          Unable to check transmission status
+          {% endif %}
+          ================================================================================
+      when: check_transmission | bool
+
+    ################################################################################
+    # Check Recent Problems
+    ################################################################################
+
+    - name: Query Recent Problems
+      ibmi_sql_query:
+        sql: |
+          SELECT 
+            PROBLEM_ID,
+            PROBLEM_STATUS,
+            PROBLEM_SEVERITY,
+            PROBLEM_SUMMARY,
+            PROBLEM_TIMESTAMP
+          FROM QSYS2.PROBLEM_LOG
+          WHERE PROBLEM_TIMESTAMP >= CURRENT_DATE - {{ days_back }} DAYS
+          ORDER BY PROBLEM_TIMESTAMP DESC
+          FETCH FIRST 10 ROWS ONLY
+      register: recent_problems
+      failed_when: false
+      when: check_recent_problems | bool
+
+    - name: Display Recent Problems
+      debug:
+        msg: |
+          ================================================================================
+          Recent Problems (Last {{ days_back }} Days) - {{ inventory_hostname }}
+          ================================================================================
+          {% if recent_problems is defined and recent_problems.row | length > 0 %}
+          {% for problem in recent_problems.row %}
+          Problem ID:   {{ problem.PROBLEM_ID }}
+          Status:       {{ problem.PROBLEM_STATUS }}
+          Severity:     {{ problem.PROBLEM_SEVERITY }}
+          Summary:      {{ problem.PROBLEM_SUMMARY }}
+          Timestamp:    {{ problem.PROBLEM_TIMESTAMP }}
+          --------------------------------------------------------------------------------
+          {% endfor %}
+          
+          Total Problems: {{ recent_problems.row | length }}
+          {% elif recent_problems is defined %}
+          ✓ No problems found in the last {{ days_back }} days
+          {% else %}
+          Unable to query problem log
+          {% endif %}
+          ================================================================================
+      when: check_recent_problems | bool
+
+    ################################################################################
+    # Network Connectivity Check
+    ################################################################################
+
+    - name: Check Network Connectivity to IBM Support
+      ibmi_cl_command:
+        cmd: "PING RMTSYS('esupport.ibm.com')"
+      register: ping_result
+      failed_when: false
+
+    - name: Display Network Connectivity
+      debug:
+        msg: |
+          ================================================================================
+          Network Connectivity - {{ inventory_hostname }}
+          ================================================================================
+          Target: esupport.ibm.com
+          {% if ping_result.rc == 0 %}
+          Status: ✓ Network connectivity OK
+          {% else %}
+          Status: ✗ Network connectivity FAILED
+          {% if ping_result.stderr is defined %}
+          Error: {{ ping_result.stderr }}
+          {% endif %}
+          
+          Action Required:
+          1. Check network configuration
+          2. Verify firewall rules allow HTTPS traffic
+          3. Check proxy configuration if applicable
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Overall Verification Summary
+    ################################################################################
+
+    - name: Generate Overall Verification Summary
+      set_fact:
+        verification_result:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          esa_enabled: "{{ config_checks.esa_enabled if config_checks is defined else false }}"
+          esa_configured: "{{ config_checks.esa_configured if config_checks is defined else false }}"
+          contact_info_complete: "{{ config_checks.has_contact_info if config_checks is defined else false }}"
+          all_jobs_active: "{{ all_jobs_active | default(false) }}"
+          transmission_ok: "{{ transmission_info.transmission_ok if transmission_info is defined else false }}"
+          network_ok: "{{ ping_result.rc == 0 }}"
+          recent_problems_count: "{{ recent_problems.row | length if recent_problems is defined else 0 }}"
+
+    - name: Calculate Overall Status
+      set_fact:
+        overall_pass: "{{ verification_result.esa_enabled and verification_result.esa_configured and verification_result.contact_info_complete and verification_result.all_jobs_active and verification_result.network_ok }}"
+
+    - name: Display Overall Verification Summary
+      debug:
+        msg: |
+          ================================================================================
+          ESA Verification Summary - {{ inventory_hostname }}
+          ================================================================================
+          Timestamp:              {{ verification_result.timestamp }}
+          
+          Configuration Status:
+            ESA Enabled:          {{ verification_result.esa_enabled | ternary('✓ YES', '✗ NO') }}
+            ESA Configured:       {{ verification_result.esa_configured | ternary('✓ YES', '✗ NO') }}
+            Contact Info Complete: {{ verification_result.contact_info_complete | ternary('✓ YES', '✗ NO') }}
+          
+          Operational Status:
+            All Jobs Active:      {{ verification_result.all_jobs_active | ternary('✓ YES', '✗ NO') }}
+            Network Connectivity: {{ verification_result.network_ok | ternary('✓ OK', '✗ FAILED') }}
+            Last Transmission:    {{ verification_result.transmission_ok | ternary('✓ SUCCESS', '⚠ FAILED/NEVER') }}
+          
+          Recent Activity:
+            Problems ({{ days_back }} days): {{ verification_result.recent_problems_count }}
+          
+          ================================================================================
+          OVERALL STATUS: {{ overall_pass | ternary('✓ PASS - ESA is properly configured and operational', '✗ FAIL - Issues detected, review details above') }}
+          ================================================================================
+          
+          {% if not overall_pass %}
+          Recommended Actions:
+          {% if not verification_result.esa_enabled %}
+          - Run ibmi-esa-enable.yml to enable ESA
+          {% endif %}
+          {% if not verification_result.contact_info_complete %}
+          - Run ibmi-esa-configure.yml to set contact information
+          {% endif %}
+          {% if not verification_result.all_jobs_active %}
+          - Run ibmi-esa-verify-jobs.yml for detailed job status
+          - Check job logs for errors
+          {% endif %}
+          {% if not verification_result.network_ok %}
+          - Verify network connectivity to esupport.ibm.com
+          - Check firewall and proxy settings
+          {% endif %}
+          {% endif %}
+
+    - name: Fail if Verification Failed
+      fail:
+        msg: |
+          ESA verification failed on {{ inventory_hostname }}
+          Overall Status: FAIL
+          Please review the verification summary above for details.
+      when:
+        - not overall_pass
+        - fail_on_errors | bool
+
+################################################################################
+# Notes:
+#
+# 1. This playbook performs comprehensive ESA verification
+# 2. Checks configuration, jobs, transmission, and network connectivity
+# 3. Provides detailed troubleshooting information
+# 4. Use -e "fail_on_errors=true" to fail on verification errors
+# 5. Use -e "check_transmission=false" to skip transmission check
+# 6. Use -e "days_back=7" to check problems for last 7 days
+#
+# Example Commands:
+#   ansible-playbook playbooks/ibmi-esa-verify-config.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-verify-config.yml -e "target_env=test"
+#   ansible-playbook playbooks/ibmi-esa-verify-config.yml --limit vk4060 -e "fail_on_errors=true"
+#   ansible-playbook playbooks/ibmi-esa-verify-config.yml -e "days_back=7"
+#
+################################################################################
+
+# Made with Bob

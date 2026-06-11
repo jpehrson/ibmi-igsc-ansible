@@ -1,0 +1,253 @@
+---
+################################################################################
+# IBM i ESA Deletion Test Playbook - SAFE QUERY ONLY
+#
+# Purpose:
+#   Test and compare what the current dangerous query would delete vs.
+#   what should actually be deleted according to IBM documentation.
+#
+# This playbook ONLY queries - it does NOT delete anything!
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-delete-test.yml --limit vk4060
+#
+################################################################################
+
+- name: Test ESA Deletion Queries (READ-ONLY)
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  tasks:
+    ################################################################################
+    # Current ESA Configuration
+    ################################################################################
+    
+    - name: Query Current ESA Configuration
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED,
+            CUSTOMER_NUMBER,
+            CUSTOMER_NAME,
+            LAST_TRANSMISSION_TIMESTAMP
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_current_config
+      failed_when: false
+
+    - name: Display Current ESA Configuration
+      debug:
+        msg: |
+          ================================================================================
+          Current ESA Configuration - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_current_config.rc == 0 and esa_current_config.row | length > 0 %}
+          {% set esa = esa_current_config.row[0] %}
+          ESA Enabled:      {{ esa.ESA_ENABLED | default('N/A') }}
+          ESA Configured:   {{ esa.ESA_CONFIGURED | default('N/A') }}
+          Customer Number:  {{ esa.CUSTOMER_NUMBER | default('N/A') }}
+          Customer Name:    {{ esa.CUSTOMER_NAME | default('N/A') }}
+          Last Transmission: {{ esa.LAST_TRANSMISSION_TIMESTAMP | default('N/A') }}
+          {% else %}
+          No ESA configuration found or query failed.
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # DANGEROUS QUERY - What the current playbook would delete
+    ################################################################################
+    
+    - name: "⚠️ DANGEROUS: Query ALL Files Starting with Q in QUSRSYS"
+      ibmi_sql_query:
+        sql: |
+          SELECT 
+            OBJNAME,
+            OBJTYPE,
+            OBJATTRIBUTE,
+            OBJLIB,
+            OBJOWNER,
+            OBJCREATED,
+            OBJTEXT
+          FROM TABLE(QSYS2.OBJECT_STATISTICS('QUSRSYS', '*FILE'))
+          WHERE OBJNAME LIKE 'Q%'
+            AND OBJTYPE = '*FILE'
+            AND OBJATTRIBUTE = 'PF'
+          ORDER BY OBJNAME
+      register: dangerous_query_files
+      failed_when: false
+
+    - name: "⚠️ Display What Would Be DELETED by Current Playbook"
+      debug:
+        msg: |
+          ================================================================================
+          ⚠️  DANGER: Files That Would Be DELETED by Current Playbook
+          ================================================================================
+          {% if dangerous_query_files.rc == 0 and dangerous_query_files.row | length > 0 %}
+          Total Files: {{ dangerous_query_files.row | length }}
+          
+          {% for file in dangerous_query_files.row %}
+          {{ loop.index }}. {{ file.OBJLIB }}/{{ file.OBJNAME }}
+             Type: {{ file.OBJTYPE }} ({{ file.OBJATTRIBUTE }})
+             Owner: {{ file.OBJOWNER }}
+             Created: {{ file.OBJCREATED }}
+             Text: {{ file.OBJTEXT | default('No description') }}
+          {% endfor %}
+          {% else %}
+          No files found or query failed.
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # SAFE QUERY - ESA-specific objects only
+    ################################################################################
+    
+    - name: "✓ SAFE: Query Known ESA-Specific Line Descriptions"
+      ibmi_sql_query:
+        sql: |
+          SELECT 
+            LINE_NAME,
+            LINE_TYPE,
+            LINE_DESCRIPTION,
+            TEXT_DESCRIPTION
+          FROM QSYS2.NETSTAT_LINE_INFO
+          WHERE LINE_NAME IN ('QESALINE', 'QESALINE2', 'QESALINE3')
+             OR (LINE_NAME LIKE 'QESA%' AND LINE_TYPE = '*PPP')
+          ORDER BY LINE_NAME
+      register: esa_specific_lines
+      failed_when: false
+
+    - name: "✓ Display ESA-Specific Line Descriptions"
+      debug:
+        msg: |
+          ================================================================================
+          ✓ ESA-Specific Line Descriptions (Safe to Delete)
+          ================================================================================
+          {% if esa_specific_lines.rc == 0 and esa_specific_lines.row | length > 0 %}
+          Total Lines: {{ esa_specific_lines.row | length }}
+          
+          {% for line in esa_specific_lines.row %}
+          {{ loop.index }}. {{ line.LINE_NAME }}
+             Type: {{ line.LINE_TYPE }}
+             Description: {{ line.LINE_DESCRIPTION | default('N/A') }}
+             Text: {{ line.TEXT_DESCRIPTION | default('N/A') }}
+          {% endfor %}
+          {% else %}
+          No ESA-specific line descriptions found.
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Check ESA Configuration Directory
+    ################################################################################
+    
+    - name: Check ESA Configuration Directory
+      ibmi_cl_command:
+        cmd: "QSH CMD('ls -la /QIBM/UserData/OS400/UniversalConnection/ 2>&1 || echo \"Directory not found\"')"
+      register: esa_config_dir
+      failed_when: false
+
+    - name: Display ESA Configuration Files
+      debug:
+        msg: |
+          ================================================================================
+          ESA Configuration Directory Contents
+          ================================================================================
+          {{ esa_config_dir.stdout | default('No output or directory not found') }}
+          ================================================================================
+      when: esa_config_dir is defined
+
+    ################################################################################
+    # Analysis and Recommendations
+    ################################################################################
+    
+    - name: Generate Analysis Report
+      set_fact:
+        analysis_report:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          esa_configured: "{{ (esa_current_config.rc == 0 and esa_current_config.row | length > 0) }}"
+          dangerous_files_count: "{{ dangerous_query_files.row | length if dangerous_query_files.rc == 0 else 0 }}"
+          safe_lines_count: "{{ esa_specific_lines.row | length if esa_specific_lines.rc == 0 else 0 }}"
+
+    - name: Display Final Analysis
+      debug:
+        msg: |
+          ================================================================================
+          ESA Deletion Analysis Report - {{ inventory_hostname }}
+          ================================================================================
+          Timestamp: {{ analysis_report.timestamp }}
+          
+          ESA Configuration Status:
+          - ESA Configured: {{ analysis_report.esa_configured }}
+          
+          ⚠️  DANGER ASSESSMENT:
+          - Files that would be DELETED by current playbook: {{ analysis_report.dangerous_files_count }}
+          - ESA-specific lines that SHOULD be deleted: {{ analysis_report.safe_lines_count }}
+          
+          ⚠️  CRITICAL WARNING:
+          The current playbook would delete {{ analysis_report.dangerous_files_count }} files from QUSRSYS!
+          Many of these are likely IBM system files, NOT ESA-specific files.
+          
+          ✓ RECOMMENDATION:
+          1. Review the list of files above carefully
+          2. Identify which files are actually ESA-related
+          3. Update the playbook to delete ONLY ESA-specific objects:
+             - Known ESA line descriptions (QESALINE, QESALINE2, etc.)
+             - ESA configuration files in /QIBM/UserData/OS400/UniversalConnection/
+             - Do NOT use wildcard queries like "OBJNAME LIKE 'Q%'"
+          
+          ================================================================================
+
+    ################################################################################
+    # Sample of System Files That Would Be Incorrectly Deleted
+    ################################################################################
+    
+    - name: Identify Likely System Files in Deletion List
+      set_fact:
+        likely_system_files: "{{ dangerous_query_files.row | selectattr('OBJOWNER', 'equalto', 'QSYS') | list if dangerous_query_files.rc == 0 else [] }}"
+      when: dangerous_query_files.rc == 0
+
+    - name: "⚠️ Display System Files That Would Be INCORRECTLY Deleted"
+      debug:
+        msg: |
+          ================================================================================
+          ⚠️  CRITICAL: System Files That Would Be INCORRECTLY Deleted
+          ================================================================================
+          {% if likely_system_files | length > 0 %}
+          Total System Files at Risk: {{ likely_system_files | length }}
+          
+          Sample of system files that would be deleted:
+          {% for file in likely_system_files[:10] %}
+          {{ loop.index }}. {{ file.OBJLIB }}/{{ file.OBJNAME }}
+             Owner: {{ file.OBJOWNER }} (SYSTEM FILE!)
+             Text: {{ file.OBJTEXT | default('No description') }}
+          {% endfor %}
+          {% if likely_system_files | length > 10 %}
+          ... and {{ likely_system_files | length - 10 }} more system files!
+          {% endif %}
+          
+          ⚠️  These are IBM system files, NOT ESA files!
+          Deleting them could cause severe system damage!
+          {% else %}
+          No system files identified (or query failed).
+          {% endif %}
+          ================================================================================
+      when: 
+        - dangerous_query_files.rc == 0
+        - likely_system_files is defined
+
+################################################################################
+# Summary
+#
+# This test playbook demonstrates:
+# 1. What the current dangerous query would delete
+# 2. What should actually be deleted (ESA-specific objects only)
+# 3. The risk of using wildcard queries in QUSRSYS
+#
+# DO NOT use the original ibmi-esa-delete.yml playbook until it is fixed!
+#
+################################################################################
+
+# Made with Bob

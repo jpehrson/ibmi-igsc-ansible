@@ -1,0 +1,387 @@
+---
+################################################################################
+# IBM i Electronic Service Agent (ESA) - Create Configuration Playbook
+#
+# Purpose:
+#   Create new ESA service configuration using CRTSRVCFG command.
+#   This establishes the basic ESA infrastructure for electronic support.
+#
+# Reference:
+#   https://www.ibm.com/support/pages/configuration-instructions-electronic-customer-support-ecs-and-electronic-service-agent-esa-ibm-i
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-create.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-create.yml -e "target_env=test"
+#   ansible-playbook playbooks/ibmi-esa-create.yml --limit vk4060 --check
+#
+# IMPORTANT:
+#   - Requires *SECOFR authority
+#   - ESA configuration must be deleted first (use ibmi-esa-delete.yml)
+#   - Country and state codes must be valid
+#   - Proxy configuration is optional
+#
+################################################################################
+
+- name: Create IBM i Electronic Service Agent Configuration
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  vars:
+    # ESA Configuration Type
+    esa_config_type: "{{ esa_cfg_type | default('*DIRECT') }}"
+    
+    # Country and State Configuration
+    # These can be overridden in host_vars or group_vars
+    esa_country: "{{ esa_country_code | default('*SELECT') }}"
+    esa_state: "{{ esa_state_code | default('*SELECT') }}"
+    
+    # Proxy Configuration (optional)
+    use_proxy: "{{ esa_use_proxy | default(false) }}"
+    proxy_server: "{{ esa_proxy_server | default('') }}"
+    proxy_port: "{{ esa_proxy_port | default('') }}"
+    
+    # Dry run mode
+    dry_run: "{{ ansible_check_mode | default(false) }}"
+
+  tasks:
+    ################################################################################
+    # Pre-creation Checks
+    ################################################################################
+    
+    - name: Check Current ESA Configuration Status
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_precreate_check
+      failed_when: false
+
+    - name: Display Current ESA Status
+      debug:
+        msg: |
+          ================================================================================
+          Pre-Creation ESA Status - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_precreate_check.row | length > 0 %}
+          {% set esa = esa_precreate_check.row[0] %}
+          ESA Enabled:    {{ esa.ESA_ENABLED | default('N/A') }}
+          ESA Configured: {{ esa.ESA_CONFIGURED | default('N/A') }}
+          
+          {% if esa.ESA_CONFIGURED == 'YES' %}
+          ⚠ WARNING: ESA is already configured!
+          Consider running ibmi-esa-delete.yml first to remove existing configuration.
+          {% endif %}
+          {% else %}
+          Status: No existing ESA configuration found (ready for creation)
+          {% endif %}
+          ================================================================================
+
+    - name: Fail if ESA Already Configured
+      fail:
+        msg: |
+          ESA is already configured on {{ inventory_hostname }}.
+          Please run ibmi-esa-delete.yml first to remove existing configuration.
+      when:
+        - esa_precreate_check.row | length > 0
+        - esa_precreate_check.row[0].ESA_CONFIGURED == 'YES'
+        - not (force_recreate | default(false))
+
+    ################################################################################
+    # Validate Configuration Parameters
+    ################################################################################
+
+    - name: Validate Country Code
+      assert:
+        that:
+          - esa_country is defined
+          - esa_country | length > 0
+        fail_msg: "Country code (esa_country_code) must be defined"
+        success_msg: "Country code validated: {{ esa_country }}"
+
+    - name: Validate State Code
+      assert:
+        that:
+          - esa_state is defined
+          - esa_state | length > 0
+        fail_msg: "State code (esa_state_code) must be defined"
+        success_msg: "State code validated: {{ esa_state }}"
+
+    - name: Validate Proxy Configuration
+      assert:
+        that:
+          - proxy_server | length > 0
+          - proxy_port | length > 0
+        fail_msg: "Proxy server and port must be defined when use_proxy is true"
+        success_msg: "Proxy configuration validated"
+      when: use_proxy | bool
+
+    - name: Display Configuration Parameters
+      debug:
+        msg: |
+          ================================================================================
+          ESA Creation Parameters - {{ inventory_hostname }}
+          ================================================================================
+          Configuration Type: {{ esa_config_type }}
+          Country Code:       {{ esa_country }}
+          State Code:         {{ esa_state }}
+          Use Proxy:          {{ use_proxy }}
+          {% if use_proxy %}
+          Proxy Server:       {{ proxy_server }}
+          Proxy Port:         {{ proxy_port }}
+          {% endif %}
+          Dry Run Mode:       {{ dry_run }}
+          ================================================================================
+
+    ################################################################################
+    # Create ESA Service Configuration
+    ################################################################################
+
+    - name: Create ESA Service Configuration (Without Proxy)
+      ibmi_cl_command:
+        cmd: "CRTSRVCFG CFGTYPE({{ esa_config_type }}) CNTRYID({{ esa_country }}) STATE({{ esa_state }})"
+      register: create_esa_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - not use_proxy
+
+    - name: Create ESA Service Configuration (With Proxy)
+      ibmi_cl_command:
+        cmd: "CRTSRVCFG CFGTYPE({{ esa_config_type }}) CNTRYID({{ esa_country }}) STATE({{ esa_state }}) PROXY('{{ proxy_server }}:{{ proxy_port }}')"
+      register: create_esa_proxy_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - use_proxy
+
+    - name: Set Creation Result Variable
+      set_fact:
+        esa_creation_result: "{{ create_esa_proxy_result if use_proxy else create_esa_result }}"
+      when: not dry_run
+
+    - name: Display ESA Creation Result
+      debug:
+        msg: |
+          ================================================================================
+          ESA Creation Result - {{ inventory_hostname }}
+          ================================================================================
+          {% if dry_run %}
+          DRY RUN MODE - No changes made
+          Command that would be executed:
+          CRTSRVCFG CFGTYPE({{ esa_config_type }}) CNTRYID({{ esa_country }}) STATE({{ esa_state }}){% if use_proxy %} PROXY('{{ proxy_server }}:{{ proxy_port }}'){% endif %}
+          {% else %}
+          Return Code: {{ esa_creation_result.rc | default('N/A') }}
+          {% if esa_creation_result.rc == 0 %}
+          Status: ✓ ESA service configuration created successfully
+          {% else %}
+          Status: ✗ ESA service configuration creation failed
+          {% if esa_creation_result.stderr is defined and esa_creation_result.stderr %}
+          Error: {{ esa_creation_result.stderr }}
+          {% endif %}
+          {% if esa_creation_result.stdout is defined and esa_creation_result.stdout %}
+          Output: {{ esa_creation_result.stdout }}
+          {% endif %}
+          {% endif %}
+          {% endif %}
+          ================================================================================
+      when: esa_creation_result is defined or dry_run
+
+    ################################################################################
+    # Handle Common Errors
+    ################################################################################
+
+    - name: Check for CPD0A35 Error (RC Related)
+      debug:
+        msg: |
+          ⚠ CPD0A35 Error Detected
+          This is an RC-related error. Please check:
+          1. IBM documentation for RC-related issues
+          2. System configuration and PTF levels
+          3. CRTSRVCFG/CHGSRVCFG Java exception documentation
+      when:
+        - not dry_run
+        - esa_creation_result is defined
+        - esa_creation_result.stderr is defined
+        - "'CPD0A35' in esa_creation_result.stderr"
+
+    - name: Fail on Creation Error (Unless Continuing)
+      fail:
+        msg: |
+          ESA service configuration creation failed on {{ inventory_hostname }}
+          Return Code: {{ esa_creation_result.rc }}
+          Error: {{ esa_creation_result.stderr | default('Unknown error') }}
+      when:
+        - not dry_run
+        - esa_creation_result is defined
+        - esa_creation_result.rc != 0
+        - not (continue_on_error | default(false))
+
+    ################################################################################
+    # Wait for Configuration to Initialize
+    ################################################################################
+
+    - name: Wait for ESA Configuration to Initialize
+      pause:
+        seconds: 5
+      when: 
+        - not dry_run
+        - esa_creation_result is defined
+        - esa_creation_result.rc == 0
+
+    ################################################################################
+    # Verify ESA Configuration Created
+    ################################################################################
+
+    - name: Verify ESA Configuration Created
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED,
+            TRANSMISSION_METHOD,
+            PROXY_SERVER,
+            PROXY_PORT
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_verify_creation
+      failed_when: false
+      when: not dry_run
+
+    - name: Display Verification Results
+      debug:
+        msg: |
+          ================================================================================
+          ESA Creation Verification - {{ inventory_hostname }}
+          ================================================================================
+          {% if dry_run %}
+          DRY RUN MODE - Verification skipped
+          {% elif esa_verify_creation.row | length > 0 %}
+          {% set esa = esa_verify_creation.row[0] %}
+          ESA Enabled:         {{ esa.ESA_ENABLED | default('N/A') }}
+          ESA Configured:      {{ esa.ESA_CONFIGURED | default('N/A') }}
+          Transmission Method: {{ esa.TRANSMISSION_METHOD | default('N/A') }}
+          {% if use_proxy %}
+          Proxy Server:        {{ esa.PROXY_SERVER | default('N/A') }}
+          Proxy Port:          {{ esa.PROXY_PORT | default('N/A') }}
+          {% endif %}
+          
+          {% if esa.ESA_CONFIGURED == 'YES' %}
+          Status: ✓ ESA configuration verified successfully
+          {% else %}
+          Status: ⚠ ESA configuration may be incomplete
+          {% endif %}
+          {% else %}
+          Status: ⚠ Unable to verify ESA configuration
+          {% endif %}
+          ================================================================================
+      when: esa_verify_creation is defined or dry_run
+
+    ################################################################################
+    # Check Configuration Files Created
+    ################################################################################
+
+    - name: Check UniversalConnection Directory
+      ibmi_cl_command:
+        cmd: "CHKOBJ OBJ('/QIBM/UserData/OS400/UniversalConnection') OBJTYPE(*DIR)"
+      register: check_uc_dir
+      failed_when: false
+      when: not dry_run
+
+    - name: List Files in UniversalConnection Directory
+      ibmi_cl_command:
+        cmd: "QSH CMD('ls -la /QIBM/UserData/OS400/UniversalConnection/')"
+      register: list_uc_files
+      failed_when: false
+      when: 
+        - not dry_run
+        - check_uc_dir is defined
+        - check_uc_dir.rc == 0
+
+    - name: Display Configuration Files
+      debug:
+        msg: |
+          ================================================================================
+          ESA Configuration Files - {{ inventory_hostname }}
+          ================================================================================
+          {% if list_uc_files is defined and list_uc_files.stdout is defined %}
+          {{ list_uc_files.stdout }}
+          {% else %}
+          Unable to list configuration files
+          {% endif %}
+          ================================================================================
+      when: 
+        - not dry_run
+        - list_uc_files is defined
+
+    ################################################################################
+    # Summary Report
+    ################################################################################
+
+    - name: Generate Creation Summary
+      set_fact:
+        creation_summary:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          dry_run: "{{ dry_run }}"
+          config_type: "{{ esa_config_type }}"
+          country: "{{ esa_country }}"
+          state: "{{ esa_state }}"
+          proxy_used: "{{ use_proxy }}"
+          creation_successful: "{{ esa_creation_result.rc == 0 if esa_creation_result is defined else false }}"
+          verification_passed: "{{ esa_verify_creation.row[0].ESA_CONFIGURED == 'YES' if (esa_verify_creation is defined and esa_verify_creation.row | length > 0) else false }}"
+
+    - name: Display Creation Summary
+      debug:
+        msg: |
+          ================================================================================
+          ESA Creation Summary - {{ inventory_hostname }}
+          ================================================================================
+          Timestamp:           {{ creation_summary.timestamp }}
+          Dry Run Mode:        {{ creation_summary.dry_run }}
+          Configuration Type:  {{ creation_summary.config_type }}
+          Country:             {{ creation_summary.country }}
+          State:               {{ creation_summary.state }}
+          Proxy Used:          {{ creation_summary.proxy_used }}
+          Creation Successful: {{ creation_summary.creation_successful }}
+          Verification Passed: {{ creation_summary.verification_passed }}
+          
+          {% if creation_summary.dry_run %}
+          Status: DRY RUN - No changes made
+          {% elif creation_summary.creation_successful and creation_summary.verification_passed %}
+          Status: ✓ ESA configuration created and verified successfully
+          Next Steps:
+          1. Run ibmi-esa-configure.yml to set contact information
+          2. Run ibmi-esa-enable.yml to enable ESA service
+          {% elif creation_summary.creation_successful %}
+          Status: ⚠ ESA created but verification incomplete
+          Recommendation: Review configuration and retry if needed
+          {% else %}
+          Status: ✗ ESA creation failed
+          Recommendation: Review errors and check prerequisites
+          {% endif %}
+          ================================================================================
+
+################################################################################
+# Notes:
+#
+# 1. This playbook requires *SECOFR authority
+# 2. ESA must not be already configured (run ibmi-esa-delete.yml first)
+# 3. Country and state codes must be valid IBM i codes
+# 4. Proxy configuration is optional but required for multi-hop environments
+# 5. Use --check mode for dry run without making changes
+# 6. After creation, run ibmi-esa-configure.yml to set contact information
+#
+# Example Commands:
+#   ansible-playbook playbooks/ibmi-esa-create.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-create.yml --limit vk4060 --check
+#   ansible-playbook playbooks/ibmi-esa-create.yml -e "use_proxy=true proxy_server=proxy.example.com proxy_port=8080"
+#
+# Country Codes: US, CA, GB, DE, FR, etc.
+# State Codes: For US: AL, AK, AZ, AR, CA, CO, CT, DE, FL, GA, etc.
+#
+################################################################################
+
+# Made with Bob

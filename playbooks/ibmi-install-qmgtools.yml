@@ -1,0 +1,92 @@
+#ibmi-install-qmgtools.yml 
+#Example playbook that installs current version of QMGTOOLS
+---
+- 
+  hosts: ibmi
+  collections:
+    - ibm.power_ibmi                                                            # Import the IBM plug-ins
+  gather_facts: yes                                                             # This is required to determine OS version
+  vars:                                                                         # Build per-host variables using gathered facts
+    urlprefix: 'http://public.dhe.ibm.com/services/us/igsc/has'                 # Prefix for URL to fetch current save file 
+    osv: '{{ansible_distribution_version}}'                                     # Operating system version
+    osr: '{{ansible_distribution_release}}'                                     # Operating system release
+    savfurl: '{{urlprefix}}/qmgtool{{osv}}{{osr}}0.savf'                        # Full URL to save file
+    isodate: '{{ansible_date_time.iso8601_basic}}'                              # e.g. "20200505T163023316014"
+    shortdate: '{{isodate[4:8]}}{{isodate[2:4]}}'                               # e.g. "050520"
+    savflib: 'QGPL'                                                             # Use QGPL for save file
+    savefile: 'QMGT{{shortdate}}'                                               # Unique name for save file (QMGT050520)
+
+  tasks:
+  - debug: msg="Host Version {{osv}}.{{osr}}"                                   # Log a couple variables to make sure correct
+  - debug: msg="Save File    {{savfurl}}"
+  
+  - name: Create temporary directory for QMGTOOLS save file
+    file:
+      path: /tmp/ansible
+      state: directory
+      
+  - name: Download QMGTOOLS save file to IFS
+    get_url:
+      url: "{{savfurl}}"                                                        # This will be specific to host OS version
+      dest: "/tmp/ansible"
+
+  - name: Search for the existence of a previous save file
+    ibmi_object_find:                                                           # Less noisy than CHKOBJ (when not present)
+      lib_name: "{{savflib}}"
+      object_name: "{{savefile}}"
+      object_type_list: "*FILE"
+    register: find_results
+      
+  - name: Delete previous save file if exists
+    ibmi_cl_command:
+      cmd: "DLTOBJ OBJ({{savflib}}/{{savefile}}) OBJTYPE(*FILE)"
+    when: find_results.object_list | length > 0                                 # If list is not empty, it found previous save file
+                        
+  - name: Copy save file from IFS into library
+    ibmi_cl_command:
+      cmd: >-                                                                   # >- to remove new line at end
+        CPY OBJ('/tmp/ansible/qmgtool{{osv}}{{osr}}0.savf') TOCCSID(37) 
+        TOOBJ('/QSYS.LIB/{{savflib}}.LIB/{{savefile}}.FILE') DTAFMT(*BINARY) 
+        AUT(*INDIR)
+      joblog: false
+    
+  - name: Delete save file from /tmp directory
+    file:
+      path: "/tmp/ansible/qmgtool{{osv}}{{osr}}0.savf"
+      state: absent      
+    ignore_errors: true
+    
+  - name: Search for the existence of QMGTOOLS library
+    ibmi_object_find:                                                           # Less noisy than CHKOBJ (when not present)
+      lib_name: QSYS
+      object_name: QMGTOOLS
+      object_type_list: "*LIB"
+    register: find_results
+    
+  - name: Clear existing QMGTOOLS library if it exists                          # Delay delete until save file is ready
+    ibmi_cl_command:
+      cmd: CLRLIB QMGTOOLS
+      joblog: false
+    when: find_results.object_list | length > 0                                 # If list is not empty, QMGTOOLS already exists
+    
+  - name: Create empty QMGTOOLS library if it does not exist
+    ibmi_cl_command:
+      cmd: CRTLIB QMGTOOLS
+      joblog: false
+    when: find_results.object_list | length == 0
+    
+  - name: Restore QMGTOOLS library from save file
+    ibmi_object_restore:
+      object_names: "*ALL"
+      object_lib: QMGTOOLS
+      object_types: "*ALL"
+      savefile_name: "{{savefile}}"
+      savefile_lib: "{{savflib}}"
+      parameters: "MBROPT(*ALL)"
+      
+  - name: Delete the save file to cleanup storage
+    ibmi_cl_command:
+      cmd: "DLTOBJ OBJ({{savflib}}/{{savefile}}) OBJTYPE(*FILE)"
+    ignore_errors: true
+                                    
+...

@@ -1,0 +1,110 @@
+﻿---
+################################################################################
+# Common Variables for All Hosts
+# These variables apply to all systems in the inventory
+################################################################################
+
+# Ansible connection settings
+ansible_connection: ssh
+ansible_shell_type: sh
+ansible_python_interpreter: /QOpenSys/pkgs/bin/python3.9
+
+# Script paths (relative to project root)
+# playbook_dir is WellSkyAnsible/playbooks, so ../.. goes to project root
+was_scripts_base: "{{ playbook_dir }}/../.."
+was_save_script: "{{ was_scripts_base }}/was_save/was_save.sh"
+was_deployment_script: "{{ was_scripts_base }}/was_install_deploy/was_full_deployment.sh"
+# Config files are in was_save/configs and was_install_deploy/configs
+was_save_configs_dir: "{{ was_scripts_base }}/was_save/configs"
+was_deployment_configs_dir: "{{ was_scripts_base }}/was_install_deploy/configs"
+
+# Default WAS paths (can be overridden per host)
+was_repo_path: /home/wellsky/was_90526_media
+was_install_root: /QIBM/ProdData/WebSphere/AppServer/V9/Base
+was_user_root: /QIBM/UserData/WebSphere/AppServer/V9/Base
+
+# Default save file settings
+default_save_lib: QGPL
+default_profile_savf: WASPRODS
+default_http_dir_savf: WEBPRODS1
+default_http_cfg_savf: WEBPRODS2
+
+# Application deployment
+app_dir: /home/wellsky/apps
+
+# Logging settings
+log_level: INFO
+default_action: abort
+
+# Timeout settings (in seconds)
+script_timeout: 3600
+transfer_timeout: 1800
+deployment_timeout: 7200
+
+# Temporary directory for file transfers
+temp_transfer_dir: /tmp/was_deployment
+
+# FTP settings for file transfers (if using FTP instead of SCP)
+use_ftp_transfer: false
+ftp_port: 21
+
+# Deployment flags
+skip_install: false
+skip_restore: false
+skip_apps: false
+skip_config: false
+
+# Backup before restore
+backup_before_restore: false
+sav_cfg_file: ""
+
+# IAS v8.5 restoration
+restore_ias85: false
+ias85_from_server_dir: "/www/IASPRODS"
+ias85_save_file: "/qsys.lib/WASTEMP.lib/IAS85SAV.file"
+ias85_location_dir: ""
+ias85_jvm_options_file: ""
+
+# IAS/IWS multi-instance metadata for Ansible visibility and verification
+ias_save_files: []
+iws_save_files: []
+ias_server_names: []
+iws_server_names: []
+
+# Server startup wait time (seconds, 0 to skip)
+server_startup_wait: 60
+
+# Auto-start options for was_save
+auto_start_enabled: false
+auto_start_wasprods: false
+auto_start_webprods: false
+auto_start_ias: false
+auto_start_iws: false
+
+# Cleanup options
+disable_cleanup: false
+
+# Force compile secure password tools
+force_compile: false
+
+# FTP options
+enable_ftp: false
+ftp_host: ""
+ftp_user: ""
+skip_save_operation: false
+ftp_utility_only: false
+
+# Transfer method (scp or ftp)
+transfer_method: scp
+transfer_retries: 3
+transfer_retry_delay: 10
+
+# Checksum verification
+verify_checksums: true
+
+# Verification settings
+verify_deployment: true
+health_check_retries: 3
+health_check_delay: 30
+
+# Made with Bob

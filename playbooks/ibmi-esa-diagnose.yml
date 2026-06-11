@@ -1,0 +1,349 @@
+---
+################################################################################
+# IBM i ESA Diagnostic Playbook
+#
+# Purpose:
+#   Diagnose why ESA jobs are not running after configuration
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-diagnose.yml --limit vk4060
+#
+################################################################################
+
+- name: IBM i ESA Diagnostic Checks
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: true
+  collections:
+    - ibm.power_ibmi
+
+  tasks:
+    - name: Display Diagnostic Header
+      debug:
+        msg: |
+          ================================================================================
+          ESA DIAGNOSTIC REPORT - {{ inventory_hostname }}
+          ================================================================================
+          Running comprehensive ESA diagnostics...
+          ================================================================================
+
+    ################################################################################
+    # Check 1: ESA Configuration Status
+    ################################################################################
+    
+    - name: Check ESA Configuration
+      ibmi_cl_command:
+        cmd: "DSPSRVAGTA"
+      register: esa_config
+      failed_when: false
+
+    - name: Display ESA Configuration
+      debug:
+        msg: |
+          ESA Configuration Status:
+          Return Code: {{ esa_config.rc }}
+          {% if esa_config.stdout is defined %}
+          Output: {{ esa_config.stdout }}
+          {% endif %}
+
+    ################################################################################
+    # Check 2: ESA Jobs Status
+    ################################################################################
+
+    - name: Query All ESA-Related Jobs
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            JOB_NAME,
+            JOB_STATUS,
+            JOB_TYPE,
+            SUBSYSTEM,
+            AUTHORIZATION_NAME,
+            FUNCTION,
+            CPU_TIME,
+            JOB_STATUS_IN_JOBQ
+          FROM TABLE(QSYS2.ACTIVE_JOB_INFO())
+          WHERE JOB_NAME LIKE 'QS%'
+          ORDER BY JOB_NAME
+      register: all_esa_jobs
+      failed_when: false
+
+    - name: Display All ESA Jobs
+      debug:
+        msg: |
+          All QS* Jobs Found:
+          {% if all_esa_jobs.rc == 0 and all_esa_jobs.row is defined and all_esa_jobs.row | length > 0 %}
+          {% for job in all_esa_jobs.row %}
+          - {{ job.JOB_NAME }}: {{ job.JOB_STATUS }} | {{ job.SUBSYSTEM | default('N/A') }} | {{ job.AUTHORIZATION_NAME }}
+          {% endfor %}
+          Total: {{ all_esa_jobs.row | length }}
+          {% else %}
+          No QS* jobs found or query failed (RC: {{ all_esa_jobs.rc | default('N/A') }})
+          {% endif %}
+
+    ################################################################################
+    # Check 3: Job Schedule Entries
+    ################################################################################
+
+    - name: Check Job Schedule Entries
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            SCHEDULED_JOB_NAME,
+            ENTRY_NUMBER,
+            STATUS,
+            FREQUENCY,
+            SCHEDULED_TIME,
+            LAST_SUBMISSION_TIME,
+            NEXT_SUBMISSION_TIME
+          FROM QSYS2.SCHEDULED_JOB_INFO
+          WHERE SCHEDULED_JOB_NAME LIKE 'QS%'
+          ORDER BY SCHEDULED_JOB_NAME
+      register: job_schedule
+      failed_when: false
+
+    - name: Display Job Schedule
+      debug:
+        msg: |
+          ESA Job Schedule Entries:
+          {% if job_schedule.rc == 0 and job_schedule.row is defined and job_schedule.row | length > 0 %}
+          {% for job in job_schedule.row %}
+          - {{ job.SCHEDULED_JOB_NAME }} ({{ job.ENTRY_NUMBER }}): {{ job.STATUS }} | Freq: {{ job.FREQUENCY }} | Next: {{ job.NEXT_SUBMISSION_TIME | default('N/A') }}
+          {% endfor %}
+          Total: {{ job_schedule.row | length }}
+          {% else %}
+          No scheduled jobs found or query failed (RC: {{ job_schedule.rc | default('N/A') }})
+          {% endif %}
+
+    ################################################################################
+    # Check 4: Job History
+    ################################################################################
+
+    - name: Check Job History for ESA Jobs
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            JOB_NAME,
+            JOB_STATUS,
+            JOB_END_TIME,
+            JOB_END_REASON,
+            COMPLETION_STATUS
+          FROM TABLE(QSYS2.JOB_INFO(JOB_STATUS_FILTER => '*ALL'))
+          WHERE JOB_NAME LIKE 'QS9%'
+            AND JOB_END_TIME >= CURRENT TIMESTAMP - 1 HOUR
+          ORDER BY JOB_END_TIME DESC
+          FETCH FIRST 20 ROWS ONLY
+      register: job_history
+      failed_when: false
+
+    - name: Display Job History
+      debug:
+        msg: |
+          Recent ESA Job History (Last Hour):
+          {% if job_history.rc == 0 and job_history.row is defined and job_history.row | length > 0 %}
+          {% for job in job_history.row %}
+          - {{ job.JOB_NAME }}: {{ job.JOB_STATUS }} | Ended: {{ job.JOB_END_TIME }} | Reason: {{ job.JOB_END_REASON | default('N/A') }}
+          {% endfor %}
+          {% else %}
+          No recent job history found or query failed (RC: {{ job_history.rc | default('N/A') }})
+          {% endif %}
+
+    ################################################################################
+    # Check 5: Contact Information
+    ################################################################################
+
+    - name: Check Contact Information
+      ibmi_cl_command:
+        cmd: "DSPCNTINF"
+      register: contact_info
+      failed_when: false
+
+    - name: Display Contact Info Status
+      debug:
+        msg: |
+          Contact Information Check:
+          Return Code: {{ contact_info.rc }}
+          {% if contact_info.stdout is defined %}
+          Output: {{ contact_info.stdout }}
+          {% endif %}
+
+    ################################################################################
+    # Check 6: Network Connectivity
+    ################################################################################
+
+    - name: Test IBM Support Connectivity
+      ibmi_cl_command:
+        cmd: "PING RMTSYS('esupport.ibm.com')"
+      register: ping_test
+      failed_when: false
+
+    - name: Display Network Test
+      debug:
+        msg: |
+          Network Connectivity Test:
+          Return Code: {{ ping_test.rc }}
+          Status: {{ 'SUCCESS - Can reach IBM' if ping_test.rc == 0 else 'FAILED - Cannot reach IBM' }}
+
+    ################################################################################
+    # Check 7: System Values
+    ################################################################################
+
+    - name: Check Relevant System Values
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            SYSTEM_VALUE_NAME,
+            CURRENT_NUMERIC_VALUE,
+            CURRENT_CHARACTER_VALUE
+          FROM QSYS2.SYSTEM_VALUE_INFO
+          WHERE SYSTEM_VALUE_NAME IN ('QAUTOCFG', 'QAUTOSPRPT', 'QSRVDMP')
+      register: system_values
+      failed_when: false
+
+    - name: Display System Values
+      debug:
+        msg: |
+          Relevant System Values:
+          {% if system_values.rc == 0 and system_values.row is defined and system_values.row | length > 0 %}
+          {% for sv in system_values.row %}
+          - {{ sv.SYSTEM_VALUE_NAME }}: {{ sv.CURRENT_CHARACTER_VALUE | default(sv.CURRENT_NUMERIC_VALUE) }}
+          {% endfor %}
+          {% else %}
+          Unable to retrieve system values or query failed (RC: {{ system_values.rc | default('N/A') }})
+          {% endif %}
+
+    ################################################################################
+    # Check 8: QSRVAGT Library Objects
+    ################################################################################
+
+    - name: Check QSRVAGT Library Objects
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            OBJNAME,
+            OBJTYPE,
+            OBJOWNER,
+            OBJCREATED,
+            LAST_USED_TIMESTAMP
+          FROM TABLE(QSYS2.OBJECT_STATISTICS('QSRVAGT', '*ALL'))
+          WHERE OBJNAME LIKE 'QS9%'
+          ORDER BY OBJNAME
+      register: qsrvagt_objects
+      failed_when: false
+
+    - name: Display QSRVAGT Objects
+      debug:
+        msg: |
+          QSRVAGT Library Objects:
+          {% if qsrvagt_objects.rc == 0 and qsrvagt_objects.row is defined and qsrvagt_objects.row | length > 0 %}
+          {% for obj in qsrvagt_objects.row %}
+          - {{ obj.OBJNAME }} ({{ obj.OBJTYPE }}): Owner={{ obj.OBJOWNER }} | Created={{ obj.OBJCREATED }}
+          {% endfor %}
+          Total: {{ qsrvagt_objects.row | length }}
+          {% else %}
+          No QS9* objects found in QSRVAGT or query failed (RC: {{ qsrvagt_objects.rc | default('N/A') }})
+          {% endif %}
+
+    ################################################################################
+    # Check 9: Message Queue
+    ################################################################################
+
+    - name: Check QSYSOPR Message Queue for ESA Messages
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            MESSAGE_ID,
+            MESSAGE_TYPE,
+            MESSAGE_TEXT,
+            MESSAGE_TIMESTAMP,
+            FROM_PROGRAM
+          FROM QSYS2.MESSAGE_QUEUE_INFO
+          WHERE MESSAGE_QUEUE_LIBRARY = 'QSYS'
+            AND MESSAGE_QUEUE_NAME = 'QSYSOPR'
+            AND (MESSAGE_TEXT LIKE '%ESA%' OR MESSAGE_TEXT LIKE '%SERVICE AGENT%' OR FROM_PROGRAM LIKE 'QS9%')
+            AND MESSAGE_TIMESTAMP >= CURRENT TIMESTAMP - 2 HOURS
+          ORDER BY MESSAGE_TIMESTAMP DESC
+          FETCH FIRST 10 ROWS ONLY
+      register: esa_messages
+      failed_when: false
+
+    - name: Display ESA Messages
+      debug:
+        msg: |
+          Recent ESA-Related Messages (Last 2 Hours):
+          {% if esa_messages.rc == 0 and esa_messages.row is defined and esa_messages.row | length > 0 %}
+          {% for msg in esa_messages.row %}
+          - {{ msg.MESSAGE_TIMESTAMP }}: {{ msg.MESSAGE_ID }} - {{ msg.MESSAGE_TEXT[:100] }}
+          {% endfor %}
+          {% else %}
+          No ESA-related messages found or query failed (RC: {{ esa_messages.rc | default('N/A') }})
+          {% endif %}
+
+    ################################################################################
+    # Final Summary
+    ################################################################################
+
+    - name: Generate Diagnostic Summary
+      set_fact:
+        diagnostic_summary:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          checks:
+            esa_configured: "{{ esa_config.rc == 0 }}"
+            jobs_running: "{{ (all_esa_jobs.row | length) if (all_esa_jobs.rc == 0 and all_esa_jobs.row is defined) else 0 }}"
+            jobs_scheduled: "{{ (job_schedule.row | length) if (job_schedule.rc == 0 and job_schedule.row is defined) else 0 }}"
+            network_ok: "{{ ping_test.rc == 0 }}"
+            objects_exist: "{{ (qsrvagt_objects.row | length) if (qsrvagt_objects.rc == 0 and qsrvagt_objects.row is defined) else 0 }}"
+          issues_found: []
+
+    - name: Identify Issues
+      set_fact:
+        diagnostic_summary: "{{ diagnostic_summary | combine({'issues_found': diagnostic_summary.issues_found + [item]}) }}"
+      loop:
+        - "{{ 'No ESA jobs running' if (all_esa_jobs.rc == 0 and all_esa_jobs.row is defined and all_esa_jobs.row | length == 0) else '' }}"
+        - "{{ 'No job schedule entries' if (job_schedule.rc == 0 and job_schedule.row is defined and job_schedule.row | length == 0) else '' }}"
+        - "{{ 'Cannot reach IBM support' if ping_test.rc != 0 else '' }}"
+        - "{{ 'Missing QSRVAGT objects' if (qsrvagt_objects.rc == 0 and qsrvagt_objects.row is defined and qsrvagt_objects.row | length == 0) else '' }}"
+      when: item != ''
+
+    - name: Display Final Diagnostic Summary
+      debug:
+        msg: |
+          ================================================================================
+          ESA DIAGNOSTIC SUMMARY
+          ================================================================================
+          System: {{ diagnostic_summary.hostname }}
+          Time: {{ diagnostic_summary.timestamp }}
+          
+          Status:
+          - ESA Configured: {{ diagnostic_summary.checks.esa_configured }}
+          - Jobs Running: {{ diagnostic_summary.checks.jobs_running }}
+          - Jobs Scheduled: {{ diagnostic_summary.checks.jobs_scheduled }}
+          - Network OK: {{ diagnostic_summary.checks.network_ok }}
+          - Objects Exist: {{ diagnostic_summary.checks.objects_exist }}
+          
+          {% if diagnostic_summary.issues_found | length > 0 %}
+          Issues Found:
+          {% for issue in diagnostic_summary.issues_found %}
+          - {{ issue }}
+          {% endfor %}
+          {% else %}
+          No critical issues detected
+          {% endif %}
+          ================================================================================
+
+    - name: Save Diagnostic Report
+      copy:
+        content: |
+          ================================================================================
+          ESA DIAGNOSTIC REPORT
+          ================================================================================
+          {{ diagnostic_summary | to_nice_yaml }}
+          
+          Generated: {{ ansible_date_time.iso8601 }}
+          ================================================================================
+        dest: "/tmp/esa_diagnostic_{{ inventory_hostname }}_{{ ansible_date_time.iso8601_basic_short }}.txt"
+      delegate_to: localhost
+
+################################################################################
+# Made with Bob
+################################################################################

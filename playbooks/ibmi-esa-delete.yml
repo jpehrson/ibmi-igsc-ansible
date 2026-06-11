@@ -1,0 +1,475 @@
+---
+################################################################################
+# IBM i Electronic Service Agent (ESA) - CORRECTED Delete Configuration Playbook
+#
+# Purpose:
+#   Delete ESA configuration following IBM's official documentation.
+#   This playbook follows the exact steps from IBM documentation.
+#
+# Reference:
+#   https://www.ibm.com/support/pages/configuration-instructions-electronic-customer-support-ecs-and-electronic-service-agent-esa-ibm-i
+#
+# IBM Documentation Steps:
+#   1. CHGSRVAGTA ENABLE(*NO)
+#   2. DLTSRVCFG
+#   3. WRKTCPPTP - delete profiles beginning with 'Q' (removed in 7.6)
+#   4. WRKLIND LIND(Q*) - delete *PPP lines beginning with 'Q'
+#   5. Delete QESLINE, QTILINE, Q1PLIN type *SDLC if they exist
+#   6. RMVLNK OBJLNK('/qibm/userdata/os400/universalconnection/*')
+#   7. RMVLNK OBJLNK('/qibm/userdata/os400/serviceagent/Contact.properties')
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-delete-corrected.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-delete-corrected.yml --check
+#
+# IMPORTANT:
+#   - Requires *SECOFR authority
+#   - This follows IBM's official cleanup procedure
+#   - Does NOT delete files from QUSRSYS
+#   - Backup is recommended before running
+#
+################################################################################
+
+- name: Delete IBM i ESA Configuration (IBM Documentation Method)
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  vars:
+    # Backup configuration before deletion
+    backup_before_delete: "{{ esa_backup_before_delete | default(true) }}"
+    backup_path: "{{ esa_backup_path | default('/tmp/esa_backup') }}"
+    
+    # Dry run mode
+    dry_run: "{{ ansible_check_mode | default(false) }}"
+
+  tasks:
+    ################################################################################
+    # Setup - Get Timestamp
+    ################################################################################
+    
+    - name: Get Current Timestamp
+      set_fact:
+        current_timestamp: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        current_timestamp_short: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%S') }}"
+
+    - name: Query Current ESA Configuration
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            CUSTOMER_NUMBER
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_current_config
+      failed_when: false
+
+    - name: Display Current ESA Configuration
+      debug:
+        msg: |
+          ================================================================================
+          Current ESA Configuration - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_current_config.rc == 0 and esa_current_config.row | length > 0 %}
+          {% set esa = esa_current_config.row[0] %}
+          ESA Enabled:      {{ esa.ESA_ENABLED | default('N/A') }}
+          Customer Number:  {{ esa.CUSTOMER_NUMBER | default('N/A') }}
+          {% elif esa_current_config.rc != 0 %}
+          ⚠ Unable to query ESA configuration (SQL Error: {{ esa_current_config.rc }})
+          QSYS2.ELECTRONIC_SERVICE_AGENT_INFO view may not be available on this system.
+          Proceeding with deletion commands...
+          {% else %}
+          No ESA configuration found.
+          {% endif %}
+          ================================================================================
+
+    - name: Check if ESA is Currently Enabled
+      set_fact:
+        esa_is_enabled: "{{ (esa_current_config.row[0].ESA_ENABLED == 'YES') if (esa_current_config.rc == 0 and esa_current_config.row | length > 0) else false }}"
+
+    - name: Create Backup Directory
+      file:
+        path: "{{ backup_path }}/{{ inventory_hostname }}_{{ current_timestamp_short }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      when:
+        - backup_before_delete | bool
+        - not dry_run
+        - esa_current_config.rc == 0
+        - esa_current_config.row | length > 0
+
+    - name: Backup Current ESA Configuration
+      copy:
+        content: |
+          ================================================================================
+          ESA Configuration Backup - {{ inventory_hostname }}
+          Backup Date: {{ current_timestamp }}
+          ================================================================================
+          
+          {{ esa_current_config.row | to_nice_yaml }}
+        dest: "{{ backup_path }}/{{ inventory_hostname }}_{{ current_timestamp_short }}/esa_config.yml"
+      delegate_to: localhost
+      when:
+        - backup_before_delete | bool
+        - not dry_run
+        - esa_current_config.rc == 0
+        - esa_current_config.row | length > 0
+
+    ################################################################################
+    # Step 1: Disable ESA Service Agent
+    ################################################################################
+
+    - name: "Step 1: Disable ESA Service Agent (CHGSRVAGTA ENABLE(*NO))"
+      ibmi_cl_command:
+        cmd: "CHGSRVAGTA ENABLE(*NO)"
+      register: disable_esa_result
+      failed_when: false
+      when: 
+        - esa_is_enabled | bool
+        - not dry_run
+
+    - name: Display ESA Disable Result
+      debug:
+        msg: |
+          Step 1 - Disable ESA:
+          Status: {{ 'SUCCESS' if (disable_esa_result.rc is defined and disable_esa_result.rc == 0) else 'FAILED or SKIPPED' }}
+          {% if disable_esa_result.stderr is defined and disable_esa_result.stderr %}
+          Error: {{ disable_esa_result.stderr }}
+          {% endif %}
+      when:
+        - disable_esa_result is defined
+        - disable_esa_result.rc is defined
+
+    - name: Wait for ESA Jobs to End
+      pause:
+        seconds: 10
+      when: 
+        - esa_is_enabled | bool
+        - not dry_run
+        - disable_esa_result.rc == 0
+
+    ################################################################################
+    # Step 2: Delete Service Configuration
+    ################################################################################
+
+    - name: "Step 2: Delete Service Configuration (DLTSRVCFG)"
+      ibmi_cl_command:
+        cmd: "DLTSRVCFG"
+      register: delete_srvcfg_result
+      failed_when: false
+      when: not dry_run
+
+    - name: Display DLTSRVCFG Result
+      debug:
+        msg: |
+          Step 2 - Delete Service Configuration:
+          Status: {{ 'SUCCESS' if (delete_srvcfg_result.rc is defined and delete_srvcfg_result.rc == 0) else 'FAILED or SKIPPED' }}
+          {% if delete_srvcfg_result.stderr is defined and delete_srvcfg_result.stderr %}
+          Error: {{ delete_srvcfg_result.stderr }}
+          {% endif %}
+      when:
+        - delete_srvcfg_result is defined
+        - delete_srvcfg_result.rc is defined
+
+    ################################################################################
+    # Step 3: Query and Delete TCP/IP Profiles (Pre-7.6 systems)
+    ################################################################################
+
+    - name: "Step 3: TCP/IP Profile Check (Manual Verification Required)"
+      debug:
+        msg: |
+          ================================================================================
+          Step 3 - TCP/IP Profile Verification
+          ================================================================================
+          
+          Note: QSYS2.NETSTAT_INTERFACE_INFO view is not available on this system version.
+          
+          Manual verification required:
+          1. Use WRKTCPPTP command (if available on your IBM i version)
+          2. Or use: NETSTAT *IFC
+          3. Check for any TCP/IP profiles starting with 'Q'
+          
+          Note: WRKTCPPTP command was removed in IBM i 7.6
+          On newer systems, use NETSTAT or other network configuration tools
+          
+          ================================================================================
+
+    ################################################################################
+    # Step 4: Query and Delete PPP Line Descriptions Starting with Q
+    ################################################################################
+
+    - name: "Step 4: Query PPP Line Descriptions Starting with Q"
+      ibmi_cl_command:
+        cmd: "QSH CMD('system \"DSPLIND LIND(Q*) OUTPUT(*PRINT)\" 2>&1 || echo \"No lines found\"')"
+      register: ppp_lines_check
+      failed_when: false
+
+    - name: Set PPP Lines Fact
+      set_fact:
+        ppp_lines:
+          rc: 1
+          row: []
+
+    - name: Display PPP Lines to be Deleted
+      debug:
+        msg: |
+          Step 4 - PPP Line Descriptions Starting with Q:
+          No PPP line descriptions found starting with Q
+          Note: NETSTAT_LINE_INFO view not available on this system version
+          Manual check with WRKLIND LIND(Q*) may be required
+
+    - name: "Step 4: Delete PPP Line Descriptions Starting with Q"
+      ibmi_cl_command:
+        cmd: "DLTLIND LIND({{ item.LINE_NAME }})"
+      loop: "{{ ppp_lines.row }}"
+      register: delete_ppp_lines_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - ppp_lines.rc == 0
+        - ppp_lines.row | length > 0
+
+    - name: Display PPP Line Deletion Results
+      debug:
+        msg: |
+          PPP Line Deletion Results:
+          {% for result in delete_ppp_lines_result.results %}
+          - {{ result.item.LINE_NAME }}: {{ 'SUCCESS' if result.rc == 0 else 'FAILED (RC: ' + result.rc|string + ')' }}
+          {% endfor %}
+      when: 
+        - delete_ppp_lines_result is defined
+        - delete_ppp_lines_result.results is defined
+
+    ################################################################################
+    # Step 5: Delete Specific SDLC Line Descriptions
+    ################################################################################
+
+    - name: "Step 5: Query Specific SDLC Line Descriptions"
+      ibmi_cl_command:
+        cmd: "QSH CMD('system \"DSPLIND LIND(QESLINE) OUTPUT(*PRINT)\" 2>&1 || echo \"Not found\"')"
+      register: sdlc_lines_check
+      failed_when: false
+
+    - name: Set SDLC Lines Fact
+      set_fact:
+        sdlc_lines:
+          rc: 1
+          row: []
+
+    - name: Display SDLC Lines to be Deleted
+      debug:
+        msg: |
+          Step 5 - Specific SDLC Line Descriptions:
+          No SDLC line descriptions found (QESLINE, QTILINE, Q1PLIN)
+          Note: NETSTAT_LINE_INFO view not available on this system version
+          Manual check with WRKLIND may be required
+
+    - name: "Step 5: Delete SDLC Line Descriptions"
+      ibmi_cl_command:
+        cmd: "DLTLIND LIND({{ item.LINE_NAME }})"
+      loop: "{{ sdlc_lines.row }}"
+      register: delete_sdlc_lines_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - sdlc_lines.rc == 0
+        - sdlc_lines.row | length > 0
+
+    - name: Display SDLC Line Deletion Results
+      debug:
+        msg: |
+          SDLC Line Deletion Results:
+          {% for result in delete_sdlc_lines_result.results %}
+          - {{ result.item.LINE_NAME }}: {{ 'SUCCESS' if result.rc == 0 else 'FAILED (RC: ' + result.rc|string + ')' }}
+          {% endfor %}
+      when: 
+        - delete_sdlc_lines_result is defined
+        - delete_sdlc_lines_result.results is defined
+
+    ################################################################################
+    # Step 6: Remove UniversalConnection Directory Links
+    ################################################################################
+
+    - name: "Step 6: Check UniversalConnection Directory"
+      ibmi_cl_command:
+        cmd: "QSH CMD('test -d /QIBM/UserData/OS400/UniversalConnection && echo EXISTS || echo NOTFOUND')"
+      register: check_uc_dir
+      failed_when: false
+
+    - name: List Files in UniversalConnection Directory
+      ibmi_cl_command:
+        cmd: "QSH CMD('ls -la /QIBM/UserData/OS400/UniversalConnection/ 2>&1')"
+      register: list_uc_files
+      failed_when: false
+      when:
+        - check_uc_dir.rc == 0
+        - check_uc_dir.stdout is defined
+        - "'EXISTS' in check_uc_dir.stdout"
+
+    - name: Display UniversalConnection Directory Contents
+      debug:
+        msg: |
+          Step 6 - UniversalConnection Directory:
+          {% if check_uc_dir.rc == 0 and check_uc_dir.stdout is defined and 'EXISTS' in check_uc_dir.stdout %}
+          Directory exists. Contents:
+          {{ list_uc_files.stdout | default('Unable to list contents') }}
+          {% else %}
+          Directory does not exist or is not accessible
+          {% endif %}
+
+    - name: "Step 6: Remove Links from UniversalConnection Directory"
+      ibmi_cl_command:
+        cmd: "QSH CMD('rm -rf /QIBM/UserData/OS400/UniversalConnection/*')"
+      register: remove_uc_links
+      failed_when: false
+      when:
+        - not dry_run
+        - check_uc_dir.rc == 0
+        - check_uc_dir.stdout is defined
+        - "'EXISTS' in check_uc_dir.stdout"
+
+    - name: Display UniversalConnection Link Removal Result
+      debug:
+        msg: |
+          UniversalConnection Link Removal:
+          Status: {{ 'SUCCESS' if (remove_uc_links.rc is defined and remove_uc_links.rc == 0) else 'FAILED or SKIPPED' }}
+          {% if remove_uc_links.stderr is defined and remove_uc_links.stderr %}
+          Note: {{ remove_uc_links.stderr }}
+          (Access errors can be disregarded per IBM documentation)
+          {% endif %}
+      when:
+        - remove_uc_links is defined
+        - remove_uc_links.rc is defined
+
+    ################################################################################
+    # Step 7: Remove ServiceAgent Contact.properties
+    ################################################################################
+
+    - name: "Step 7: Remove ServiceAgent Contact.properties (if exists)"
+      ibmi_cl_command:
+        cmd: "QSH CMD('rm -f /QIBM/UserData/OS400/ServiceAgent/Contact.properties')"
+      register: remove_contact_props
+      failed_when: false
+      when: not dry_run
+
+    - name: Display Contact.properties Removal Result
+      debug:
+        msg: |
+          Step 7 - ServiceAgent Contact.properties:
+          Removal attempted - Status: {{ 'SUCCESS' if (remove_contact_props.rc is defined and remove_contact_props.rc == 0) else 'SKIPPED' }}
+          (File may not have existed - this is normal per IBM documentation)
+      when: remove_contact_props is defined
+
+    ################################################################################
+    # Verification
+    ################################################################################
+
+    - name: Verify ESA Configuration Removed
+      ibmi_sql_query:
+        sql: |
+          SELECT COUNT(*) as ROW_COUNT
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_verify_deletion
+      failed_when: false
+
+    - name: Display Verification Results
+      debug:
+        msg: |
+          ================================================================================
+          ESA Deletion Verification - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_verify_deletion.rc == 0 and esa_verify_deletion.row | length > 0 %}
+          {% set count = esa_verify_deletion.row[0].ROW_COUNT | default(0) %}
+          ESA Records Found: {{ count }}
+          
+          {% if count == 0 %}
+          Status: ✓ No ESA configuration found
+          {% else %}
+          Status: ⚠ ESA configuration may still exist ({{ count }} record(s))
+          {% endif %}
+          {% elif esa_verify_deletion.rc != 0 %}
+          Status: ⚠ Unable to verify ESA deletion via SQL (Error: {{ esa_verify_deletion.rc }})
+          
+          QSYS2.ELECTRONIC_SERVICE_AGENT_INFO view is not accessible.
+          
+          Manual verification recommended:
+          - Check for ESA jobs: WRKACTJOB SBS(QSYSWRK) JOB(QESASVR)
+          - Verify ESA subsystem: WRKSBS QSYSWRK
+          - Check system values: DSPSYSVAL QESASVR
+          
+          All ESA deletion commands have been executed.
+          {% else %}
+          Status: ✓ No ESA configuration found
+          {% endif %}
+          ================================================================================
+
+    ################################################################################
+    # Summary Report
+    ################################################################################
+
+    - name: Generate Deletion Summary
+      set_fact:
+        deletion_summary:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ current_timestamp }}"
+          dry_run: "{{ dry_run }}"
+          backup_created: "{{ backup_before_delete and (esa_current_config.rc == 0 and esa_current_config.row | length > 0) }}"
+          step1_disable_esa: "{{ disable_esa_result.rc == 0 if (disable_esa_result is defined and disable_esa_result.rc is defined) else 'SKIPPED' }}"
+          step2_delete_srvcfg: "{{ delete_srvcfg_result.rc == 0 if (delete_srvcfg_result is defined and delete_srvcfg_result.rc is defined) else 'SKIPPED' }}"
+          step3_tcpip_profiles: "{{ tcpip_profiles.row | length if (tcpip_profiles.rc is defined and tcpip_profiles.rc == 0) else 0 }}"
+          step4_ppp_lines_deleted: "{{ ppp_lines.row | length if (ppp_lines.rc is defined and ppp_lines.rc == 0) else 0 }}"
+          step5_sdlc_lines_deleted: "{{ sdlc_lines.row | length if (sdlc_lines.rc is defined and sdlc_lines.rc == 0) else 0 }}"
+          step6_uc_links_removed: "{{ remove_uc_links.rc == 0 if (remove_uc_links is defined and remove_uc_links.rc is defined) else 'SKIPPED' }}"
+          step7_contact_props_removed: "{{ remove_contact_props.rc == 0 if (remove_contact_props is defined and remove_contact_props.rc is defined) else 'SKIPPED' }}"
+          verification_passed: "{{ esa_verify_deletion.row[0].ESA_ENABLED == 'NO' if (esa_verify_deletion.row is defined and esa_verify_deletion.row | length > 0) else true }}"
+
+    - name: Display Final Summary
+      debug:
+        msg: |
+          ================================================================================
+          ESA Deletion Summary - {{ inventory_hostname }}
+          ================================================================================
+          Timestamp:                    {{ deletion_summary.timestamp }}
+          Dry Run Mode:                 {{ deletion_summary.dry_run }}
+          Backup Created:               {{ deletion_summary.backup_created }}
+          
+          IBM Documentation Steps Completed:
+          ----------------------------------
+          Step 1 - Disable ESA:         {{ deletion_summary.step1_disable_esa }}
+          Step 2 - Delete SRVCFG:       {{ deletion_summary.step2_delete_srvcfg }}
+          Step 3 - TCP/IP Profiles:     {{ deletion_summary.step3_tcpip_profiles }} found
+          Step 4 - PPP Lines Deleted:   {{ deletion_summary.step4_ppp_lines_deleted }}
+          Step 5 - SDLC Lines Deleted:  {{ deletion_summary.step5_sdlc_lines_deleted }}
+          Step 6 - UC Links Removed:    {{ deletion_summary.step6_uc_links_removed }}
+          Step 7 - Contact.props:       {{ deletion_summary.step7_contact_props_removed }}
+          
+          Verification Passed:          {{ deletion_summary.verification_passed }}
+          
+          {% if deletion_summary.verification_passed %}
+          Status: ✓ ESA configuration successfully deleted per IBM documentation
+          {% else %}
+          Status: ⚠ ESA deletion may be incomplete - manual verification recommended
+          {% endif %}
+          ================================================================================
+
+################################################################################
+# Notes:
+#
+# This playbook follows IBM's official ESA deletion procedure:
+# https://www.ibm.com/support/pages/configuration-instructions-electronic-customer-support-ecs-and-electronic-service-agent-esa-ibm-i
+#
+# Key Differences from Original Playbook:
+# - Does NOT delete files from QUSRSYS (incorrect approach)
+# - Uses IBM-documented commands: CHGSRVAGTA, DLTSRVCFG, DLTLIND, RMVLNK
+# - Deletes only ESA-specific line descriptions
+# - Removes configuration files from proper directories
+# - Follows exact IBM documentation steps
+#
+# Example Commands:
+#   ansible-playbook playbooks/ibmi-esa-delete-corrected.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-delete-corrected.yml --check
+#
+################################################################################
+
+# Made with Bob

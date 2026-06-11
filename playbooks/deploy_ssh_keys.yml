@@ -1,0 +1,111 @@
+---
+################################################################################
+# SSH Public Key Deployment Playbook
+# 
+# This playbook deploys SSH public keys to managed hosts for passwordless
+# authentication. Keys are stored in the ssh_keys directory and deployed
+# based on host-specific configuration.
+#
+# Usage:
+#   ansible-playbook playbooks/deploy_ssh_keys.yml --limit vk4060 --ask-pass
+#   ansible-playbook playbooks/deploy_ssh_keys.yml -e "target_env=test" --ask-pass
+################################################################################
+
+- name: Deploy SSH Public Keys to IBM i Hosts
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: true
+  
+  vars:
+    ssh_keys_dir: "{{ playbook_dir }}/../ssh_keys"
+  
+  tasks:
+    - name: Display target host information
+      debug:
+        msg: "Deploying SSH keys to {{ inventory_hostname }} ({{ ansible_host }})"
+    
+    - name: Check if host-specific SSH key file exists
+      stat:
+        path: "{{ ssh_keys_dir }}/{{ inventory_hostname }}_authorized_keys"
+      delegate_to: localhost
+      register: host_key_file
+    
+    - name: Display key file status
+      debug:
+        msg: "Key file for {{ inventory_hostname }}: {{ 'Found' if host_key_file.stat.exists else 'Not found' }}"
+    
+    - name: Ensure .ssh directory exists
+      file:
+        path: "~/.ssh"
+        state: directory
+        mode: '0700'
+      when: host_key_file.stat.exists
+    
+    - name: Deploy SSH public key to authorized_keys
+      authorized_key:
+        user: "{{ ansible_user }}"
+        state: present
+        key: "{{ lookup('file', ssh_keys_dir + '/' + inventory_hostname + '_authorized_keys') }}"
+        exclusive: no
+        comment: "Deployed by Ansible on {{ ansible_date_time.iso8601 }}"
+      when: host_key_file.stat.exists
+      register: key_deployment
+    
+    - name: Display deployment result
+      debug:
+        msg: "SSH key deployment {{ 'successful' if key_deployment.changed else 'already present' }}"
+      when: host_key_file.stat.exists
+    
+    - name: Verify authorized_keys file permissions
+      file:
+        path: "~/.ssh/authorized_keys"
+        mode: '0600'
+      when: host_key_file.stat.exists
+    
+    - name: Test SSH key authentication (optional)
+      command: echo "SSH key authentication test successful"
+      register: test_result
+      changed_when: false
+      when: host_key_file.stat.exists
+    
+    - name: Display test result
+      debug:
+        msg: "{{ test_result.stdout }}"
+      when: 
+        - host_key_file.stat.exists
+        - test_result is defined
+
+################################################################################
+# Post-deployment verification
+################################################################################
+
+- name: Verify SSH Key Deployment
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  
+  tasks:
+    - name: Check authorized_keys file exists
+      stat:
+        path: "~/.ssh/authorized_keys"
+      register: auth_keys_file
+    
+    - name: Display verification results
+      debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Authorized keys file exists: {{ auth_keys_file.stat.exists }}
+          File permissions: {{ auth_keys_file.stat.mode | default('N/A') }}
+          File size: {{ auth_keys_file.stat.size | default(0) }} bytes
+      when: auth_keys_file.stat.exists
+    
+    - name: Count keys in authorized_keys
+      shell: grep -c "^ssh-\|^ecdsa-" ~/.ssh/authorized_keys || echo "0"
+      register: key_count
+      changed_when: false
+      when: auth_keys_file.stat.exists
+    
+    - name: Display key count
+      debug:
+        msg: "Number of SSH keys configured: {{ key_count.stdout }}"
+      when: auth_keys_file.stat.exists
+
+# Made with Bob

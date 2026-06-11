@@ -1,0 +1,58 @@
+﻿---
+################################################################################
+# Template Systems Group Variables
+# Variables specific to the template system used for creating WAS save files
+################################################################################
+
+# Template system role
+system_role: template
+
+# WAS save script settings
+was_save_enabled: true
+enable_ftp: false
+
+# Save file library (override if different from default)
+save_lib: "{{ default_save_lib }}"
+
+# Save file names
+profile_savf: "{{ default_profile_savf }}"
+http_dir_savf: "{{ default_http_dir_savf }}"
+http_cfg_savf: "{{ default_http_cfg_savf }}"
+
+# WAS profile path on template system
+was_profile_path: "{{ was_user_root }}"
+
+# HTTP server instance name
+http_server: WEBPRODS
+
+# Logging
+log_level: INFO
+
+# Template configuration file for was_save.sh
+# This file should exist in the configs/ directory
+template_config: template_save.config
+
+# Component enable/disable flags
+enable_webprods: true
+enable_wasprods: true
+enable_ias: true
+enable_iws: false
+
+# Multi-instance configuration (optional)
+# Leave empty for single-instance deployments
+# Format: "name:path:savefile,name:path:savefile,..."
+was_profiles: []
+ias_servers: []
+iws_servers: []
+
+# Auto-start configuration
+auto_start: false
+auto_start_wasprods: false
+auto_start_webprods: false
+auto_start_ias: false
+auto_start_iws: false
+
+# Cleanup configuration
+cleanup_logs: true
+
+# Made with Bob

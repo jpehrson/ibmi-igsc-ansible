@@ -1,0 +1,403 @@
+---
+################################################################################
+# IBM i Electronic Service Agent (ESA) - Configure Settings Playbook
+#
+# Purpose:
+#   Configure ESA settings including customer information, contact details,
+#   and transmission schedule after ESA service configuration is created.
+#
+# Reference:
+#   https://www.ibm.com/support/pages/configuration-instructions-electronic-customer-support-ecs-and-electronic-service-agent-esa-ibm-i
+#
+# Usage:
+#   ansible-playbook playbooks/ibmi-esa-configure.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-configure.yml -e "target_env=test"
+#
+# IMPORTANT:
+#   - Requires *SECOFR authority
+#   - ESA service configuration must exist (run ibmi-esa-create.yml first)
+#   - Contact information should be defined in host_vars or group_vars
+#
+################################################################################
+
+- name: Configure IBM i Electronic Service Agent Settings
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+  collections:
+    - ibm.power_ibmi
+  
+  vars:
+    # Customer Information
+    customer_number: "{{ esa_customer_number | default('') }}"
+    customer_name: "{{ esa_customer_name | default('') }}"
+    customer_country: "{{ esa_customer_country | default('US') }}"
+    
+    # Primary Contact Information
+    contact_name: "{{ esa_contact_name | default('') }}"
+    contact_phone: "{{ esa_contact_phone | default('') }}"
+    contact_email: "{{ esa_contact_email | default('') }}"
+    
+    # System Contact Information (optional)
+    system_contact_name: "{{ esa_system_contact_name | default('') }}"
+    system_contact_phone: "{{ esa_system_contact_phone | default('') }}"
+    system_contact_email: "{{ esa_system_contact_email | default('') }}"
+    
+    # Alternate Contact Information (optional)
+    alternate_contact_name: "{{ esa_alternate_contact_name | default('') }}"
+    alternate_contact_phone: "{{ esa_alternate_contact_phone | default('') }}"
+    alternate_contact_email: "{{ esa_alternate_contact_email | default('') }}"
+    
+    # Transmission Settings
+    collect_time: "{{ esa_collect_time | default('02:00:00') }}"
+    transmission_schedule: "{{ esa_transmission_schedule | default('DAILY') }}"
+    
+    # Test Mode
+    test_mode: "{{ esa_test_mode | default(false) }}"
+    
+    # Dry run mode
+    dry_run: "{{ ansible_check_mode | default(false) }}"
+
+  tasks:
+    ################################################################################
+    # Pre-configuration Checks
+    ################################################################################
+    
+    - name: Check ESA Configuration Status
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED,
+            CUSTOMER_NUMBER,
+            CUSTOMER_NAME
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_preconfig_check
+      failed_when: false
+
+    - name: Display Current ESA Status
+      debug:
+        msg: |
+          ================================================================================
+          Pre-Configuration ESA Status - {{ inventory_hostname }}
+          ================================================================================
+          {% if esa_preconfig_check.row | length > 0 %}
+          {% set esa = esa_preconfig_check.row[0] %}
+          ESA Enabled:     {{ esa.ESA_ENABLED | default('N/A') }}
+          ESA Configured:  {{ esa.ESA_CONFIGURED | default('N/A') }}
+          Customer Number: {{ esa.CUSTOMER_NUMBER | default('Not Set') }}
+          Customer Name:   {{ esa.CUSTOMER_NAME | default('Not Set') }}
+          {% else %}
+          Status: No ESA configuration found
+          {% endif %}
+          ================================================================================
+
+    - name: Fail if ESA Not Configured
+      fail:
+        msg: |
+          ESA service configuration does not exist on {{ inventory_hostname }}.
+          Please run ibmi-esa-create.yml first to create the configuration.
+      when:
+        - esa_preconfig_check.row | length == 0 or esa_preconfig_check.row[0].ESA_CONFIGURED != 'YES'
+
+    ################################################################################
+    # Validate Configuration Parameters
+    ################################################################################
+
+    - name: Validate Required Contact Information
+      assert:
+        that:
+          - contact_name | length > 0
+          - contact_phone | length > 0
+          - contact_email | length > 0
+        fail_msg: "Primary contact information (name, phone, email) must be defined"
+        success_msg: "Primary contact information validated"
+
+    - name: Display Configuration Parameters
+      debug:
+        msg: |
+          ================================================================================
+          ESA Configuration Parameters - {{ inventory_hostname }}
+          ================================================================================
+          Customer Information:
+            Number:  {{ customer_number if customer_number else 'Not Set' }}
+            Name:    {{ customer_name if customer_name else 'Not Set' }}
+            Country: {{ customer_country }}
+          
+          Primary Contact:
+            Name:    {{ contact_name }}
+            Phone:   {{ contact_phone }}
+            Email:   {{ contact_email }}
+          
+          {% if system_contact_name %}
+          System Contact:
+            Name:    {{ system_contact_name }}
+            Phone:   {{ system_contact_phone }}
+            Email:   {{ system_contact_email }}
+          {% endif %}
+          
+          {% if alternate_contact_name %}
+          Alternate Contact:
+            Name:    {{ alternate_contact_name }}
+            Phone:   {{ alternate_contact_phone }}
+            Email:   {{ alternate_contact_email }}
+          {% endif %}
+          
+          Transmission Settings:
+            Collect Time: {{ collect_time }}
+            Schedule:     {{ transmission_schedule }}
+            Test Mode:    {{ test_mode }}
+          
+          Dry Run Mode: {{ dry_run }}
+          ================================================================================
+
+    ################################################################################
+    # Configure ESA Using GO SERVICE Menu Options
+    ################################################################################
+    
+    # Note: Direct SQL updates to QSYS2.ELECTRONIC_SERVICE_AGENT_INFO are not
+    # supported. Configuration must be done through CL commands or menu options.
+    # This playbook uses CL commands to configure ESA settings.
+
+    - name: Configure Customer Information
+      ibmi_cl_command:
+        cmd: "CHGSRVAGTA CUSTID('{{ customer_number }}') CUSTNAME('{{ customer_name }}') CNTRY('{{ customer_country }}')"
+      register: config_customer_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - customer_number | length > 0
+        - customer_name | length > 0
+
+    - name: Display Customer Configuration Result
+      debug:
+        msg: |
+          Customer Configuration Result:
+          Return Code: {{ config_customer_result.rc | default('N/A') }}
+          {% if config_customer_result.rc == 0 %}
+          Status: ✓ Customer information configured successfully
+          {% else %}
+          Status: ⚠ Customer configuration may have issues
+          {% if config_customer_result.stderr is defined %}
+          Error: {{ config_customer_result.stderr }}
+          {% endif %}
+          {% endif %}
+      when: config_customer_result is defined
+
+    - name: Configure Primary Contact Information
+      ibmi_cl_command:
+        cmd: "CHGSRVAGTA CNTCTNAME('{{ contact_name }}') CNTCTPHONE('{{ contact_phone }}') CNTCTEMAIL('{{ contact_email }}')"
+      register: config_contact_result
+      failed_when: false
+      when: not dry_run
+
+    - name: Display Contact Configuration Result
+      debug:
+        msg: |
+          Contact Configuration Result:
+          Return Code: {{ config_contact_result.rc | default('N/A') }}
+          {% if config_contact_result.rc == 0 %}
+          Status: ✓ Contact information configured successfully
+          {% else %}
+          Status: ⚠ Contact configuration may have issues
+          {% if config_contact_result.stderr is defined %}
+          Error: {{ config_contact_result.stderr }}
+          {% endif %}
+          {% endif %}
+      when: config_contact_result is defined
+
+    - name: Configure System Contact Information
+      ibmi_cl_command:
+        cmd: "CHGSRVAGTA SYSCNTCTNAME('{{ system_contact_name }}') SYSCNTCTPHONE('{{ system_contact_phone }}') SYSCNTCTEMAIL('{{ system_contact_email }}')"
+      register: config_syscontact_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - system_contact_name | length > 0
+
+    - name: Configure Alternate Contact Information
+      ibmi_cl_command:
+        cmd: "CHGSRVAGTA ALTCNTCTNAME('{{ alternate_contact_name }}') ALTCNTCTPHONE('{{ alternate_contact_phone }}') ALTCNTCTEMAIL('{{ alternate_contact_email }}')"
+      register: config_altcontact_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - alternate_contact_name | length > 0
+
+    - name: Configure Transmission Schedule
+      ibmi_cl_command:
+        cmd: "CHGSRVAGTA COLLECTTIME('{{ collect_time }}')"
+      register: config_schedule_result
+      failed_when: false
+      when: not dry_run
+
+    - name: Display Schedule Configuration Result
+      debug:
+        msg: |
+          Schedule Configuration Result:
+          Return Code: {{ config_schedule_result.rc | default('N/A') }}
+          {% if config_schedule_result.rc == 0 %}
+          Status: ✓ Transmission schedule configured successfully
+          {% else %}
+          Status: ⚠ Schedule configuration may have issues
+          {% if config_schedule_result.stderr is defined %}
+          Error: {{ config_schedule_result.stderr }}
+          {% endif %}
+          {% endif %}
+      when: config_schedule_result is defined
+
+    - name: Configure Test Mode
+      ibmi_cl_command:
+        cmd: "CHGSRVAGTA TESTMODE(*YES)"
+      register: config_testmode_result
+      failed_when: false
+      when: 
+        - not dry_run
+        - test_mode | bool
+
+    ################################################################################
+    # Verify Configuration
+    ################################################################################
+
+    - name: Wait for Configuration to Apply
+      pause:
+        seconds: 3
+      when: not dry_run
+
+    - name: Verify ESA Configuration
+      ibmi_sql_query:
+        sql: |
+          SELECT
+            ESA_ENABLED,
+            ESA_CONFIGURED,
+            CUSTOMER_NUMBER,
+            CUSTOMER_NAME,
+            CUSTOMER_COUNTRY,
+            CUSTOMER_CONTACT_NAME,
+            CUSTOMER_CONTACT_PHONE,
+            CUSTOMER_CONTACT_EMAIL,
+            SYSTEM_CONTACT_NAME,
+            SYSTEM_CONTACT_PHONE,
+            SYSTEM_CONTACT_EMAIL,
+            ALTERNATE_CONTACT_NAME,
+            ALTERNATE_CONTACT_PHONE,
+            ALTERNATE_CONTACT_EMAIL,
+            TRANSMISSION_SCHEDULE,
+            TESTMODE_ENABLED
+          FROM QSYS2.ELECTRONIC_SERVICE_AGENT_INFO
+      register: esa_verify_config
+      failed_when: false
+      when: not dry_run
+
+    - name: Display Verification Results
+      debug:
+        msg: |
+          ================================================================================
+          ESA Configuration Verification - {{ inventory_hostname }}
+          ================================================================================
+          {% if dry_run %}
+          DRY RUN MODE - Verification skipped
+          {% elif esa_verify_config.row | length > 0 %}
+          {% set esa = esa_verify_config.row[0] %}
+          ESA Status:
+            Enabled:    {{ esa.ESA_ENABLED | default('N/A') }}
+            Configured: {{ esa.ESA_CONFIGURED | default('N/A') }}
+            Test Mode:  {{ esa.TESTMODE_ENABLED | default('N/A') }}
+          
+          Customer Information:
+            Number:  {{ esa.CUSTOMER_NUMBER | default('Not Set') }}
+            Name:    {{ esa.CUSTOMER_NAME | default('Not Set') }}
+            Country: {{ esa.CUSTOMER_COUNTRY | default('Not Set') }}
+          
+          Primary Contact:
+            Name:  {{ esa.CUSTOMER_CONTACT_NAME | default('Not Set') }}
+            Phone: {{ esa.CUSTOMER_CONTACT_PHONE | default('Not Set') }}
+            Email: {{ esa.CUSTOMER_CONTACT_EMAIL | default('Not Set') }}
+          
+          {% if esa.SYSTEM_CONTACT_NAME %}
+          System Contact:
+            Name:  {{ esa.SYSTEM_CONTACT_NAME }}
+            Phone: {{ esa.SYSTEM_CONTACT_PHONE }}
+            Email: {{ esa.SYSTEM_CONTACT_EMAIL }}
+          {% endif %}
+          
+          {% if esa.ALTERNATE_CONTACT_NAME %}
+          Alternate Contact:
+            Name:  {{ esa.ALTERNATE_CONTACT_NAME }}
+            Phone: {{ esa.ALTERNATE_CONTACT_PHONE }}
+            Email: {{ esa.ALTERNATE_CONTACT_EMAIL }}
+          {% endif %}
+          
+          Transmission:
+            Schedule: {{ esa.TRANSMISSION_SCHEDULE | default('Not Set') }}
+          
+          Status: ✓ ESA configuration verified
+          {% else %}
+          Status: ⚠ Unable to verify ESA configuration
+          {% endif %}
+          ================================================================================
+      when: esa_verify_config is defined or dry_run
+
+    ################################################################################
+    # Summary Report
+    ################################################################################
+
+    - name: Generate Configuration Summary
+      set_fact:
+        config_summary:
+          hostname: "{{ inventory_hostname }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          dry_run: "{{ dry_run }}"
+          customer_configured: "{{ config_customer_result.rc == 0 if config_customer_result is defined else false }}"
+          contact_configured: "{{ config_contact_result.rc == 0 if config_contact_result is defined else false }}"
+          schedule_configured: "{{ config_schedule_result.rc == 0 if config_schedule_result is defined else false }}"
+          verification_passed: "{{ esa_verify_config.row[0].CUSTOMER_CONTACT_NAME == contact_name if (esa_verify_config is defined and esa_verify_config.row | length > 0) else false }}"
+
+    - name: Display Configuration Summary
+      debug:
+        msg: |
+          ================================================================================
+          ESA Configuration Summary - {{ inventory_hostname }}
+          ================================================================================
+          Timestamp:              {{ config_summary.timestamp }}
+          Dry Run Mode:           {{ config_summary.dry_run }}
+          Customer Configured:    {{ config_summary.customer_configured }}
+          Contact Configured:     {{ config_summary.contact_configured }}
+          Schedule Configured:    {{ config_summary.schedule_configured }}
+          Verification Passed:    {{ config_summary.verification_passed }}
+          
+          {% if config_summary.dry_run %}
+          Status: DRY RUN - No changes made
+          {% elif config_summary.contact_configured and config_summary.verification_passed %}
+          Status: ✓ ESA configuration completed successfully
+          Next Steps:
+          1. Run ibmi-esa-enable.yml to enable ESA service
+          2. Run ibmi-esa-verify-jobs.yml to verify jobs are active
+          {% else %}
+          Status: ⚠ ESA configuration may be incomplete
+          Recommendation: Review configuration and retry if needed
+          {% endif %}
+          ================================================================================
+
+################################################################################
+# Notes:
+#
+# 1. This playbook requires *SECOFR authority
+# 2. ESA service configuration must exist before running this playbook
+# 3. Contact information should be defined in host_vars or group_vars
+# 4. CHGSRVAGTA command is used to configure ESA settings
+# 5. Configuration is verified after application
+# 6. After configuration, run ibmi-esa-enable.yml to enable ESA
+#
+# Example Commands:
+#   ansible-playbook playbooks/ibmi-esa-configure.yml --limit vk4060
+#   ansible-playbook playbooks/ibmi-esa-configure.yml -e "target_env=test"
+#   ansible-playbook playbooks/ibmi-esa-configure.yml --limit vk4060 --check
+#
+# Required Variables (define in host_vars/vk4060.yml):
+#   esa_contact_name: "IT Operations"
+#   esa_contact_phone: "+1-303-555-0100"
+#   esa_contact_email: "ops@wellsky.com"
+#
+################################################################################
+
+# Made with Bob

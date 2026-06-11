@@ -1,0 +1,45 @@
+# Copyright (c) IBM Corporation 2019, 2020
+# Apache License, Version 2.0 (see https://opensource.org/licenses/Apache-2.0)
+
+#ibmi_start_sbs__host_and_tcp_servers.yml
+#Example playbook providing an example on how to start all IBM i Host Servers, most TCP Servers, and IBM i Subsystems and jobs.
+---
+- hosts: ibmi
+  gather_facts: false
+  collections: 
+    - ibm.power_ibmi
+
+  tasks:
+    - name: Start IBM i Subsystems
+      ibmi_start_subsystem:
+        subsystem: '{{item}}'
+        joblog: False
+      register: strsbs_results
+      failed_when:
+        - strsbs_results.rc != 255
+        - strsbs_results.rc != 0
+      ignore_errors: True
+      with_items:
+        - 'QSYSWRK'
+        - 'QSERVER'
+        - 'QUSRWRK'
+        - 'QBATCH'
+        - 'QSERVER'
+        - 'QSPL'
+      
+
+    - name: Start IBM i Host Servers
+      ibmi_host_server_service:
+        name_list: ['{{item}}']
+        state: started
+        joblog: False
+      with_items:
+        - '*ALL'
+
+    - name: Start IBM i TCP Services
+      ibmi_tcp_server_service:
+        name_list: ['{{item}}']
+        state: started
+        joblog: False
+      with_items:
+        - '*AUTOSTART'

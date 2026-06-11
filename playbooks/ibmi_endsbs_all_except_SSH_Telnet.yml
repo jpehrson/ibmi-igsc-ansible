@@ -1,0 +1,78 @@
+# Copyright (c) IBM Corporation 2019, 2020
+# Apache License, Version 2.0 (see https://opensource.org/licenses/Apache-2.0)
+
+#ibmi_endsbs_all_except_SSH_Telnet.yml 
+#Example playbook providing an example on how to end all IBM i Host Servers, most TCP Servers, and IBM i Subsystems and jobs except that required for Telnet, SSH and Ansible.
+---
+- hosts: ibmi
+  gather_facts: false
+  collections: 
+    - ibm.power_ibmi
+
+  tasks:
+    - name: End IBM i Host Servers
+      ibmi_host_server_service:
+        name_list: ['{{item}}']
+        state: stopped
+        joblog: True
+      with_items:
+        - '*ALL'
+    - name: End IBM i TCP Services
+      ibmi_tcp_server_service:
+        name_list: ['{{item}}']
+        state: stopped
+        joblog: True
+      with_items:
+        - '*BOOTP'
+        - '*DBG'
+        - '*DDM'
+        - '*DHCP'
+        - '*DIRSRV'
+        - '*DLFM'
+        - '*DNS'
+        - '*DOMINO'
+        - '*EDRSQL'
+        - '*FTP'
+        - '*HOD'
+        - '*INETD'
+        - '*LPD'
+        - '*MGTC'
+        - '*NETSVR'
+        - '*NSLD'
+        - '*NTP'
+        - '*ODPA'
+        - '*OMPROUTED'
+        - '*ONDMD'
+        - '*POP'
+        - '*QOS'
+        - '*REXEC'
+        - '*ROUTED'
+        - '*SLP'
+        - '*SMTP'
+        - '*SNMP'
+        - '*SRVSPTPRX'
+        - '*TCM'
+        - '*TFTP'
+        - '*VPN'
+        - '*WEBFACING'
+
+    - name: End IBM i Subsystems
+      ibmi_end_subsystem:
+        subsystem: '{{item}}'
+        how_to_end: '*IMMED'
+        joblog: True
+      ignore_errors: True
+      register: endsbs_results
+      failed_when: 
+        - endsbs_results.rc != 0
+        - endsbs_results.rc != 255
+      with_items:
+        - 'QBATCH'
+        - 'QHTTPSVR'
+        - 'QSERVER'
+        - 'QSNADS'
+        - 'QSPL'
+        - 'QWAS85'
+        - 'QWAS9'
+        - 'Q1ABRMENT'
+        - 'Q1ABRMNET'    
