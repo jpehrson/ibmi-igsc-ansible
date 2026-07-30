@@ -6,30 +6,14 @@
 # Environment identifier
 env_name: dev
 
-# WAS installation settings
-was_repo_path: /home/wellsky/was_90526_media
-skip_install: false
-
 # Save file library for this environment
 save_lib: DEVLIB
 
 # Application directory
-app_dir: /home/wellsky/apps/dev
+app_dir: /home/apps/dev
 
 # Logging level (can be more verbose in dev)
 log_level: DEBUG
-
-# Failure action (more lenient in dev)
-default_action: retry
-
-# Deployment flags
-skip_restore: false
-skip_apps: false
-
-# Verification settings
-verify_deployment: true
-health_check_retries: 5
-health_check_delay: 20
 
 vault_dev1_password: !vault |
           $ANSIBLE_VAULT;1.1;AES256

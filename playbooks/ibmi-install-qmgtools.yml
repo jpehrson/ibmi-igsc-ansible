@@ -2,7 +2,7 @@
 #Example playbook that installs current version of QMGTOOLS
 ---
 - 
-  hosts: ibmi
+  hosts: all
   collections:
     - ibm.power_ibmi                                                            # Import the IBM plug-ins
   gather_facts: yes                                                             # This is required to determine OS version

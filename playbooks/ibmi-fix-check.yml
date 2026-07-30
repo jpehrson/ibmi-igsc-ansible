@@ -4,7 +4,7 @@
 #ibmi-fix-repo-sample.yml 
 #The sample file is to provide an example about how to manipulate the PTF database
 ---
-- hosts: vk4060
+- hosts: all
   gather_facts: false
   collections:
    - ibm.power_ibmi

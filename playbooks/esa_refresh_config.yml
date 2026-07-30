@@ -4,7 +4,7 @@
 #esa_refresh_config.yml 
 #Example playbook to delete and re-create the ESA service configuration.
 ---
-- hosts: ibmi
+- hosts: all
   gather_facts: true
   collections: 
     - ibm.power_ibmi
